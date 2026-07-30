@@ -1,0 +1,15 @@
+{
+  "name": "开发者缓存清理",
+  "description": "清理 npm / pip / yarn / Composer / Gradle / Maven / Go 等包管理器缓存。默认全部关闭，开发者按需开启。整理自 BleachBit 与各项目清理实践。",
+  "version": "1.0.0",
+  "homepage": "https://github.com/bleachbit/bleachbit",
+  "rules": [
+    { "id": "npm-cache", "name": "npm 缓存", "type": "custom", "target": "%LOCALAPPDATA%\\npm-cache", "patterns": "*", "schedule": "0 4 * * 0", "enabled": false },
+    { "id": "pip-cache", "name": "pip 缓存", "type": "custom", "target": "%LOCALAPPDATA%\\pip\\Cache", "patterns": "*", "schedule": "0 4 * * 0", "enabled": false },
+    { "id": "yarn-cache", "name": "Yarn 缓存", "type": "custom", "target": "%LOCALAPPDATA%\\Yarn\\Cache", "patterns": "*", "schedule": "0 4 * * 0", "enabled": false },
+    { "id": "composer-cache", "name": "Composer 缓存", "type": "custom", "target": "%APPDATA%\\Composer\\cache", "patterns": "*", "schedule": "0 4 * * 0", "enabled": false },
+    { "id": "gradle-cache", "name": "Gradle 缓存", "type": "custom", "target": "%USERPROFILE%\\.gradle\\caches", "patterns": "*", "schedule": "0 5 * * 0", "enabled": false },
+    { "id": "maven-cache", "name": "Maven 仓库元数据", "type": "custom", "target": "%USERPROFILE%\\.m2\\repository", "patterns": "*.lastUpdated,*.repositories,_remote.repositories", "schedule": "0 5 * * 0", "enabled": false },
+    { "id": "go-build", "name": "Go 构建缓存", "type": "custom", "target": "%LOCALAPPDATA%\\go-build", "patterns": "*", "schedule": "0 5 * * 0", "enabled": false }
+  ]
+}

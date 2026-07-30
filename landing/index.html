@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="zh-CN" data-accent="indigo">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgentSC · AI 驱动的磁盘文件变更追踪</title>
+<meta name="description" content="AgentSC 是 AI 驱动的磁盘文件变更追踪软件，集实时监控、占用分析、智能清理、网络安全与系统工具于一体，100% 本地运行，隐私优先。" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="apple-touch-icon" href="favicon.svg" />
+<style>
+/* ══════════════════════════════════════════════════════════════
+   AgentSC Landing — Design Tokens (mirrors the app design system)
+   Deep slate-blue base · Vibrant indigo primary · Cyan info
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --bg:           222 41% 4.5%;
+  --bg-2:         222 38% 7%;
+  --fg:           214 25% 88%;
+  --muted:        223 30% 10%;
+  --muted-fg:     215 15% 58%;
+  --card:         222 35% 6.5%;
+  --border:       215 20% 18%;
+  --border-soft:  215 20% 14%;
+  --primary:      224 76% 56%;
+  --primary-fg:   0 0% 100%;
+  --ring:         224 76% 56%;
+  --info:         199 89% 48%;
+  --success:      160 67% 45%;
+  --warning:      38 92% 52%;
+  --destructive:  0 72% 51%;
+  --grad-from:    224 76% 61%;
+  --grad-via:     245 83% 68%;
+  --grad-to:      199 89% 55%;
+  --radius:       0.85rem;
+  --maxw:         1200px;
+  --ease:         cubic-bezier(0.16,1,0.3,1);
+}
+:root[data-accent='indigo']{--primary:224 76% 56%;--ring:224 76% 56%;--info:199 89% 48%;--grad-from:224 76% 61%;--grad-via:245 83% 68%;--grad-to:199 89% 55%;}
+:root[data-accent='violet']{--primary:262 83% 64%;--ring:262 83% 64%;--info:280 80% 62%;--grad-from:262 83% 64%;--grad-via:291 78% 68%;--grad-to:212 90% 64%;}
+:root[data-accent='blue']{--primary:217 91% 60%;--ring:217 91% 60%;--info:205 90% 56%;--grad-from:217 91% 62%;--grad-via:224 90% 66%;--grad-to:199 89% 56%;}
+:root[data-accent='cyan']{--primary:199 89% 50%;--ring:199 89% 50%;--info:191 90% 48%;--grad-from:199 89% 52%;--grad-via:190 92% 58%;--grad-to:174 72% 50%;}
+:root[data-accent='emerald']{--primary:160 72% 42%;--ring:160 72% 42%;--info:173 80% 42%;--grad-from:160 72% 44%;--grad-via:152 69% 50%;--grad-to:173 80% 46%;}
+:root[data-accent='amber']{--primary:35 92% 52%;--ring:35 92% 52%;--info:45 93% 50%;--grad-from:35 92% 54%;--grad-via:43 95% 58%;--grad-to:25 95% 55%;}
+:root[data-accent='orange']{--primary:25 95% 55%;--ring:25 95% 55%;--info:38 95% 53%;--grad-from:25 95% 57%;--grad-via:33 96% 60%;--grad-to:14 90% 58%;}
+:root[data-accent='rose']{--primary:346 84% 60%;--ring:346 84% 60%;--info:330 81% 60%;--grad-from:346 84% 62%;--grad-via:330 82% 66%;--grad-to:280 70% 62%;}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:hsl(var(--bg));
+  color:hsl(var(--fg));
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+  -webkit-font-smoothing:antialiased;
+  line-height:1.6;
+  overflow-x:hidden;
+}
+a{color:inherit;text-decoration:none}
+img,svg{display:block}
+::selection{background:hsl(var(--primary)/0.3);color:hsl(var(--fg))}
+
+/* ── Layout helpers ───────────────────────────────────────── */
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(1.25rem,4vw,2.5rem)}
+.gradient-text{
+  background:linear-gradient(135deg,hsl(var(--grad-from)),hsl(var(--grad-via)) 50%,hsl(var(--grad-to)));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.brand-gradient{background-image:linear-gradient(135deg,hsl(var(--primary)),hsl(var(--grad-via)) 55%,hsl(var(--info)))}
+.eyebrow{
+  font-family:'JetBrains Mono',ui-monospace,monospace;
+  font-size:.78rem;letter-spacing:.18em;text-transform:uppercase;
+  color:hsl(var(--info));font-weight:500;
+}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+
+/* ── Glass / surface ─────────────────────────────────────── */
+.glass{
+  background:hsl(var(--card)/0.72);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border:1px solid hsl(var(--border)/0.5);
+}
+.card{
+  background:linear-gradient(180deg,hsl(var(--card)/0.9),hsl(var(--card)/0.6));
+  border:1px solid hsl(var(--border)/0.6);
+  border-radius:var(--radius);
+  position:relative;
+}
+.card-glow::after{
+  content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;
+  background:linear-gradient(135deg,hsl(var(--primary)/0.5),hsl(var(--info)/0.2),transparent 60%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;
+}
+.glow{
+  box-shadow:0 0 24px -6px hsl(var(--primary)/0.35),0 0 60px -20px hsl(var(--primary)/0.25);
+}
+
+/* ── Buttons ─────────────────────────────────────────────── */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:.55rem;
+  font-weight:600;font-size:.95rem;line-height:1;
+  padding:.85rem 1.5rem;border-radius:.7rem;cursor:pointer;border:1px solid transparent;
+  transition:transform .25s var(--ease),box-shadow .25s var(--ease),background .25s,opacity .2s;
+  white-space:nowrap;
+}
+.btn svg{width:1.1em;height:1.1em}
+.btn-primary{
+  background:linear-gradient(135deg,hsl(var(--primary)),hsl(var(--grad-via)));
+  color:#fff;box-shadow:0 6px 20px -6px hsl(var(--primary)/0.6);
+}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 10px 30px -6px hsl(var(--primary)/0.7)}
+.btn-ghost{
+  background:hsl(var(--card)/0.6);color:hsl(var(--fg));
+  border-color:hsl(var(--border)/0.8);
+}
+.btn-ghost:hover{transform:translateY(-2px);border-color:hsl(var(--primary)/0.5);background:hsl(var(--card)/0.9)}
+
+/* ══════════════════════════════════════════════════════════════
+   Background field — aurora blobs + grid
+   ══════════════════════════════════════════════════════════════ */
+.bg-field{position:fixed;inset:0;z-index:-2;overflow:hidden;pointer-events:none}
+.blob{position:absolute;border-radius:50%;filter:blur(90px);opacity:.5;animation:float 18s ease-in-out infinite}
+.blob.b1{width:46vw;height:46vw;left:-10vw;top:-12vw;background:radial-gradient(circle,hsl(var(--primary)/0.55),transparent 65%)}
+.blob.b2{width:40vw;height:40vw;right:-8vw;top:4vw;background:radial-gradient(circle,hsl(var(--info)/0.45),transparent 65%);animation-delay:-6s}
+.blob.b3{width:38vw;height:38vw;left:30vw;top:42vh;background:radial-gradient(circle,hsl(var(--grad-via)/0.4),transparent 65%);animation-delay:-11s}
+@keyframes float{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(4vw,3vh) scale(1.08)}66%{transform:translate(-3vw,-2vh) scale(0.96)}}
+.grid-bg{
+  position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:radial-gradient(circle at 1px 1px,hsl(var(--border)/0.45) 1px,transparent 0);
+  background-size:26px 26px;
+  mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 80%);
+  -webkit-mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 80%);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Nav
+   ══════════════════════════════════════════════════════════════ */
+header.nav{position:sticky;top:0;z-index:50;transition:background .3s,box-shadow .3s}
+header.nav.scrolled{background:hsl(var(--bg)/0.7);backdrop-filter:blur(16px);border-bottom:1px solid hsl(var(--border)/0.5)}
+.nav-inner{display:flex;align-items:center;gap:1.5rem;height:68px}
+.brand{display:flex;align-items:center;gap:.6rem;font-weight:800;font-size:1.1rem;letter-spacing:-.02em}
+.brand .mark{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;position:relative;overflow:hidden}
+.brand .mark svg{width:18px;height:18px;color:#fff;position:relative;z-index:1}
+.brand .mark::before{content:"";position:absolute;inset:0;background-image:linear-gradient(135deg,hsl(var(--primary)),hsl(var(--info)))}
+.nav-links{display:none;gap:.4rem;margin-left:1rem}
+.nav-links a{padding:.5rem .85rem;border-radius:.6rem;color:hsl(var(--muted-fg));font-size:.92rem;font-weight:500;transition:color .2s,background .2s}
+.nav-links a:hover{color:hsl(var(--fg));background:hsl(var(--card)/0.7)}
+.nav-right{margin-left:auto;display:flex;align-items:center;gap:.75rem}
+.accent-picker{display:none;gap:.4rem;align-items:center;padding:.4rem .55rem;border-radius:.7rem;border:1px solid hsl(var(--border)/0.6);background:hsl(var(--card)/0.5)}
+.accent-dot{width:16px;height:16px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:transform .2s,box-shadow .2s}
+.accent-dot:hover{transform:scale(1.2)}
+.accent-dot[aria-pressed="true"]{border-color:#fff;box-shadow:0 0 0 2px hsl(var(--bg)),0 0 0 3px #fff8}
+@media(min-width:980px){.nav-links{display:flex}.accent-picker{display:flex}}
+
+/* ══════════════════════════════════════════════════════════════
+   Hero
+   ══════════════════════════════════════════════════════════════ */
+.hero{padding:clamp(3rem,9vh,6.5rem) 0 clamp(2rem,5vh,4rem)}
+.hero-grid{display:grid;gap:clamp(2rem,5vw,3.5rem);align-items:center}
+@media(min-width:980px){.hero-grid{grid-template-columns:1.05fr .95fr}}
+.badge{display:inline-flex;align-items:center;gap:.5rem;padding:.4rem .8rem;border-radius:999px;
+  border:1px solid hsl(var(--border)/0.7);background:hsl(var(--card)/0.6);font-size:.82rem;color:hsl(var(--muted-fg))}
+.badge .live{width:7px;height:7px;border-radius:50%;background:hsl(var(--success));box-shadow:0 0 0 0 hsl(var(--success)/0.6);animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 hsl(var(--success)/0.55)}70%{box-shadow:0 0 0 8px hsl(var(--success)/0)}100%{box-shadow:0 0 0 0 hsl(var(--success)/0)}}
+h1.hero-title{
+  font-size:clamp(2.4rem,6.4vw,4.4rem);line-height:1.04;letter-spacing:-.03em;font-weight:800;
+  margin:1.4rem 0 0;
+}
+.hero-sub{font-size:clamp(1.02rem,1.6vw,1.22rem);color:hsl(var(--muted-fg));max-width:34ch;margin-top:1.4rem}
+.hero-cta{display:flex;flex-wrap:wrap;gap:.85rem;margin-top:2rem}
+.hero-meta{display:flex;flex-wrap:wrap;gap:1.4rem;margin-top:2.2rem;font-size:.85rem;color:hsl(var(--muted-fg))}
+.hero-meta span{display:inline-flex;align-items:center;gap:.45rem}
+.hero-meta svg{width:1.05em;height:1.05em;color:hsl(var(--info))}
+
+/* ── Hero mock: live event stream ──────────────────────────── */
+.mock{
+  border-radius:1.1rem;overflow:hidden;
+  background:linear-gradient(180deg,hsl(var(--card)/0.95),hsl(var(--bg-2)/0.9));
+  border:1px solid hsl(var(--border)/0.7);
+  box-shadow:0 30px 80px -30px hsl(var(--primary)/0.35),0 0 0 1px hsl(var(--border)/0.3);
+}
+.mock-bar{display:flex;align-items:center;gap:.5rem;padding:.7rem 1rem;border-bottom:1px solid hsl(var(--border)/0.5);background:hsl(var(--card)/0.7)}
+.mock-bar .dot{width:11px;height:11px;border-radius:50%}
+.mock-bar .t{margin-left:.6rem;font-size:.78rem;color:hsl(var(--muted-fg));font-family:'JetBrains Mono',monospace}
+.mock-body{padding:1rem 1.1rem;display:flex;flex-direction:column;gap:.55rem;min-height:300px}
+.evt{display:grid;grid-template-columns:auto 1fr auto;gap:.7rem;align-items:center;
+  padding:.6rem .7rem;border-radius:.6rem;background:hsl(var(--muted)/0.5);border:1px solid hsl(var(--border)/0.4);
+  animation:slideIn .5s var(--ease) both}
+@keyframes slideIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+.evt .ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;flex:none}
+.evt .ic svg{width:15px;height:15px;color:#fff}
+.evt .meta{min-width:0}
+.evt .path{font-size:.85rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.evt .act{font-size:.72rem;color:hsl(var(--muted-fg));font-family:'JetBrains Mono',monospace}
+.evt .time{font-size:.7rem;color:hsl(var(--muted-fg));font-family:'JetBrains Mono',monospace;white-space:nowrap}
+.chip{font-size:.66rem;font-weight:600;padding:.15rem .5rem;border-radius:999px;font-family:'JetBrains Mono',monospace}
+.chip.create{color:hsl(var(--success));background:hsl(var(--success)/0.14)}
+.chip.modify{color:hsl(var(--warning));background:hsl(var(--warning)/0.14)}
+.chip.delete{color:hsl(var(--destructive));background:hsl(var(--destructive)/0.14)}
+.chip.move{color:hsl(var(--info));background:hsl(var(--info)/0.14)}
+.mock-foot{display:flex;gap:1.2rem;padding:.8rem 1.1rem;border-top:1px solid hsl(var(--border)/0.5);font-size:.74rem;color:hsl(var(--muted-fg));font-family:'JetBrains Mono',monospace}
+.spark{display:flex;align-items:flex-end;gap:3px;height:28px}
+.spark i{width:5px;border-radius:2px;background:linear-gradient(180deg,hsl(var(--primary)),hsl(var(--info)));animation:wave 1.6s ease-in-out infinite;transform-origin:bottom}
+@keyframes wave{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+
+/* ══════════════════════════════════════════════════════════════
+   Stats strip
+   ══════════════════════════════════════════════════════════════ */
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;margin-top:clamp(2.5rem,6vh,4rem);
+  background:hsl(var(--border)/0.4);border:1px solid hsl(var(--border)/0.5);border-radius:var(--radius);overflow:hidden}
+@media(min-width:780px){.stats{grid-template-columns:repeat(4,1fr)}}
+.stat{background:hsl(var(--bg)/0.6);padding:1.4rem 1.2rem;text-align:center}
+.stat .num{font-size:clamp(1.8rem,3.4vw,2.6rem);font-weight:800;letter-spacing:-.02em;line-height:1}
+.stat .lbl{font-size:.82rem;color:hsl(var(--muted-fg));margin-top:.5rem}
+
+/* ══════════════════════════════════════════════════════════════
+   Section scaffolding
+   ══════════════════════════════════════════════════════════════ */
+section.block{padding:clamp(3.5rem,9vh,6rem) 0}
+.sec-head{max-width:640px;margin-bottom:clamp(2rem,4vh,3rem)}
+.sec-head h2{font-size:clamp(1.8rem,4vw,2.8rem);font-weight:800;letter-spacing:-.025em;line-height:1.1;margin-top:.8rem}
+.sec-head p{color:hsl(var(--muted-fg));margin-top:1rem;font-size:1.02rem}
+
+/* ── Feature bento ─────────────────────────────────────────── */
+.bento{display:grid;gap:1.1rem;grid-template-columns:1fr}
+@media(min-width:680px){.bento{grid-template-columns:repeat(2,1fr)}}
+@media(min-width:1040px){.bento{grid-template-columns:repeat(6,1fr)}}
+.feat{grid-column:span 1;padding:1.5rem;border-radius:var(--radius);transition:transform .35s var(--ease),border-color .35s,box-shadow .35s}
+.feat:hover{transform:translateY(-4px);border-color:hsl(var(--primary)/0.45);box-shadow:0 20px 50px -24px hsl(var(--primary)/0.4)}
+@media(min-width:1040px){.feat.span3{grid-column:span 3}.feat.span2{grid-column:span 2}.feat.span4{grid-column:span 4}}
+.feat .fic{width:46px;height:46px;border-radius:12px;display:grid;place-items:center;margin-bottom:1.1rem;
+  background:linear-gradient(135deg,hsl(var(--primary)/0.18),hsl(var(--info)/0.14));border:1px solid hsl(var(--primary)/0.25)}
+.feat .fic svg{width:23px;height:23px;color:hsl(var(--primary))}
+.feat h3{font-size:1.18rem;font-weight:700;letter-spacing:-.01em}
+.feat p{color:hsl(var(--muted-fg));font-size:.92rem;margin-top:.5rem}
+.feat ul{list-style:none;margin-top:1rem;display:flex;flex-direction:column;gap:.5rem}
+.feat li{display:flex;align-items:center;gap:.55rem;font-size:.88rem;color:hsl(var(--fg)/0.85)}
+.feat li svg{width:15px;height:15px;color:hsl(var(--info));flex:none}
+.feat .tag{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:hsl(var(--muted-fg));
+  border:1px solid hsl(var(--border)/.7);padding:.15rem .5rem;border-radius:6px;margin-left:auto}
+
+/* ══════════════════════════════════════════════════════════════
+   Screenshot gallery — real app screenshots
+   ══════════════════════════════════════════════════════════════ */
+.ssg{display:grid;gap:1.2rem;margin-top:1.5rem}
+@media(min-width:920px){.ssg{grid-template-columns:1.4fr 1fr;grid-template-rows:auto auto}}
+.ss{border-radius:1rem;overflow:hidden;border:1px solid hsl(var(--border)/0.6);
+  background:linear-gradient(180deg,hsl(var(--card)/0.98),hsl(var(--bg-2)/0.92));
+  box-shadow:0 24px 70px -20px hsl(var(--primary)/0.25),0 0 0 1px hsl(var(--border)/0.25);
+  transition:transform .4s var(--ease),box-shadow .4s var(--ease);
+  position:relative}
+.ss:hover{transform:translateY(-6px);box-shadow:0 32px 90px -20px hsl(var(--primary)/0.35),0 0 40px -16px hsl(var(--primary)/0.15)}
+.ss-main{grid-row:span 2}
+.ss-bar{display:flex;align-items:center;gap:.45rem;padding:.65rem 1rem;
+  border-bottom:1px solid hsl(var(--border)/0.45);background:hsl(var(--card)/0.55)}
+.ss-bar .dot{width:10px;height:10px;border-radius:50%;flex:none}
+.ss-bar .ttl{margin-left:.5rem;font-size:.78rem;font-weight:600;color:hsl(var(--fg)/0.9);letter-spacing:-.01em}
+.ss-bar .tag-pill{margin-left:auto;font-size:.68rem;font-weight:600;padding:.12rem .5rem;
+  border-radius:999px;font-family:'JetBrains Mono',monospace;
+  border:1px solid hsl(var(--primary)/0.35);color:hsl(var(--primary));background:hsl(var(--primary)/0.1)}
+.ss-img{display:block;width:100%;height:auto;image-rendering:-webkit-optimize-contrast;image-rendering:crisp-edges}
+.ss-caption{padding:.75rem 1rem .85rem;font-size:.8rem;color:hsl(var(--muted-fg));
+  border-top:1px solid hsl(var(--border)/0.35);background:hsl(var(--card)/0.4);
+  display:flex;align-items:center;gap:.5rem}
+.ss-caption svg{width:14px;height:14px;color:hsl(var(--info));flex:none}
+
+/* ══════════════════════════════════════════════════════════════
+   How it works
+   ══════════════════════════════════════════════════════════════ */
+.steps{display:grid;gap:1.1rem;grid-template-columns:1fr}
+@media(min-width:820px){.steps{grid-template-columns:repeat(3,1fr)}}
+.step{padding:1.6rem;border-radius:var(--radius);position:relative}
+.step .n{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:hsl(var(--info));font-weight:700}
+.step h3{font-size:1.2rem;font-weight:700;margin:.7rem 0 .5rem}
+.step p{color:hsl(var(--muted-fg));font-size:.92rem}
+.step .sline{height:2px;background:linear-gradient(90deg,hsl(var(--primary)),transparent);margin-top:1.2rem;border-radius:2px}
+
+/* ══════════════════════════════════════════════════════════════
+   Why / comparison
+   ══════════════════════════════════════════════════════════════ */
+.cols{display:grid;gap:1.1rem;grid-template-columns:1fr}
+@media(min-width:760px){.cols{grid-template-columns:repeat(2,1fr)}}
+@media(min-width:1040px){.cols{grid-template-columns:repeat(4,1fr)}}
+.reason{padding:1.5rem;border-radius:var(--radius)}
+.reason .ric{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;margin-bottom:1rem;background:hsl(var(--primary)/0.14);border:1px solid hsl(var(--primary)/0.25)}
+.reason .ric svg{width:21px;height:21px;color:hsl(var(--primary))}
+.reason h3{font-size:1.05rem;font-weight:700}
+.reason p{color:hsl(var(--muted-fg));font-size:.88rem;margin-top:.45rem}
+
+table.cmp{width:100%;border-collapse:collapse;margin-top:1.5rem;font-size:.92rem;border-radius:var(--radius);overflow:hidden;border:1px solid hsl(var(--border)/.5)}
+table.cmp th,table.cmp td{padding:.9rem 1rem;text-align:left;border-bottom:1px solid hsl(var(--border)/.4)}
+table.cmp th{font-weight:600;color:hsl(var(--muted-fg));font-size:.82rem;text-transform:uppercase;letter-spacing:.04em;background:hsl(var(--card)/.5)}
+table.cmp td:first-child{color:hsl(var(--muted-fg))}
+table.cmp .yes{color:hsl(var(--success));font-weight:600}
+table.cmp .no{color:hsl(var(--muted-fg)/.6)}
+table.cmp tr:last-child td{border-bottom:none}
+table.cmp .us{background:hsl(var(--primary)/0.08)}
+
+/* ══════════════════════════════════════════════════════════════
+   Final CTA
+   ══════════════════════════════════════════════════════════════ */
+.cta-panel{position:relative;overflow:hidden;border-radius:1.4rem;padding:clamp(2.5rem,6vw,4.5rem);text-align:center;
+  background:linear-gradient(135deg,hsl(var(--primary)/0.16),hsl(var(--info)/0.1));border:1px solid hsl(var(--primary)/0.3)}
+.cta-panel::before{content:"";position:absolute;inset:0;background:
+  radial-gradient(60% 80% at 20% 10%,hsl(var(--primary)/0.25),transparent 60%),
+  radial-gradient(50% 70% at 90% 90%,hsl(var(--info)/0.22),transparent 60%);pointer-events:none}
+.cta-panel>*{position:relative}
+.cta-panel h2{font-size:clamp(1.9rem,4.5vw,3rem);font-weight:800;letter-spacing:-.025em;line-height:1.1}
+.cta-panel p{color:hsl(var(--fg)/0.82);margin:1rem auto 0;max-width:46ch;font-size:1.02rem}
+.cta-panel .hero-cta{justify-content:center}
+.sysreq{margin-top:1.6rem;font-size:.8rem;color:hsl(var(--muted-fg));font-family:'JetBrains Mono',monospace}
+
+/* ══════════════════════════════════════════════════════════════
+   Footer
+   ══════════════════════════════════════════════════════════════ */
+footer.foot{border-top:1px solid hsl(var(--border)/.5);margin-top:clamp(3rem,7vh,5rem);padding:2.5rem 0}
+.foot-grid{display:grid;gap:2rem;grid-template-columns:1fr;align-items:start}
+@media(min-width:720px){.foot-grid{grid-template-columns:1.4fr 1fr 1fr 1fr}}
+.foot h4{font-size:.82rem;text-transform:uppercase;letter-spacing:.05em;color:hsl(var(--muted-fg));margin-bottom:1rem}
+.foot a{display:block;color:hsl(var(--fg)/0.75);font-size:.9rem;padding:.3rem 0;transition:color .2s}
+.foot a:hover{color:hsl(var(--primary))}
+.foot .desc{color:hsl(var(--muted-fg));font-size:.88rem;max-width:30ch;margin-top:1rem}
+.foot-bottom{display:flex;flex-wrap:wrap;gap:1rem;justify-content:space-between;align-items:center;
+  margin-top:2.5rem;padding-top:1.5rem;border-top:1px solid hsl(var(--border)/.4);font-size:.8rem;color:hsl(var(--muted-fg))}
+
+/* ── Reveal animation ───────────────────────────────────────── */
+.reveal{opacity:0;transform:translateY(22px);transition:opacity .7s var(--ease),transform .7s var(--ease)}
+.reveal.in{opacity:1;transform:none}
+.reveal[data-d="1"]{transition-delay:.08s}
+.reveal[data-d="2"]{transition-delay:.16s}
+.reveal[data-d="3"]{transition-delay:.24s}
+
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important;scroll-behavior:auto!important}
+  .reveal{opacity:1;transform:none;transition:none}
+  .blob{display:none}
+}
+</style>
+</head>
+<body>
+
+<!-- background field -->
+<div class="bg-field" aria-hidden="true"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
+<div class="grid-bg" aria-hidden="true"></div>
+
+<!-- ════════ NAV ════════ -->
+<header class="nav" id="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top" aria-label="AgentSC 首页">
+      <span class="mark brand-gradient"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg></span>
+      AgentSC
+    </a>
+    <nav class="nav-links" aria-label="主导航">
+      <a href="#features">功能模块</a>
+      <a href="#workspace">工作台</a>
+      <a href="#how">工作原理</a>
+      <a href="#why">为什么选</a>
+    </nav>
+    <div class="nav-right">
+      <div class="accent-picker" role="group" aria-label="主题配色">
+        <button class="accent-dot" data-accent="indigo"  aria-pressed="true"  style="background:linear-gradient(135deg,hsl(224 76% 61%),hsl(199 89% 55%))" title="靛蓝"></button>
+        <button class="accent-dot" data-accent="violet"  aria-pressed="false" style="background:linear-gradient(135deg,hsl(262 83% 64%),hsl(212 90% 64%))" title="紫罗兰"></button>
+        <button class="accent-dot" data-accent="blue"    aria-pressed="false" style="background:linear-gradient(135deg,hsl(217 91% 62%),hsl(199 89% 56%))" title="天蓝"></button>
+        <button class="accent-dot" data-accent="cyan"    aria-pressed="false" style="background:linear-gradient(135deg,hsl(199 89% 52%),hsl(174 72% 50%))" title="青色"></button>
+        <button class="accent-dot" data-accent="emerald" aria-pressed="false" style="background:linear-gradient(135deg,hsl(160 72% 44%),hsl(173 80% 46%))" title="翠绿"></button>
+        <button class="accent-dot" data-accent="amber"   aria-pressed="false" style="background:linear-gradient(135deg,hsl(35 92% 54%),hsl(25 95% 55%))" title="琥珀"></button>
+        <button class="accent-dot" data-accent="orange"  aria-pressed="false" style="background:linear-gradient(135deg,hsl(25 95% 57%),hsl(14 90% 58%))" title="橙橙"></button>
+        <button class="accent-dot" data-accent="rose"    aria-pressed="false" style="background:linear-gradient(135deg,hsl(346 84% 62%),hsl(280 70% 62%))" title="玫红"></button>
+      </div>
+      <a class="btn btn-primary" href="#download">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+        免费下载
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ════════ HERO ════════ -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="badge"><span class="live"></span> 实时文件变更追踪 · 本地 AI 引擎</span>
+      <h1 class="hero-title">让每一次<br><span class="gradient-text">磁盘文件变动</span><br>都一目了然</h1>
+      <p class="hero-sub">AgentSC 是 AI 驱动的磁盘文件变更追踪软件——实时捕获、智能分析、主动清理，把系统里发生的一切尽收眼底。</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#download">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          下载 Windows 版
+        </a>
+        <a class="btn btn-ghost" href="#workspace">查看工作台演示</a>
+      </div>
+      <div class="hero-meta">
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg> Windows 10 / 11</span>
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> 100% 本地运行</span>
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M2 12h20"/></svg> 零数据上传</span>
+      </div>
+    </div>
+
+    <!-- live event stream mock -->
+    <div class="mock reveal" aria-hidden="true">
+      <div class="mock-bar">
+        <span class="dot" style="background:#ff5f56"></span>
+        <span class="dot" style="background:#ffbd2e"></span>
+        <span class="dot" style="background:#27c93f"></span>
+        <span class="t">agentsc · 文件变动事件流</span>
+      </div>
+      <div class="mock-body" id="evtStream"></div>
+      <div class="mock-foot">
+        <span class="spark" id="spark"></span>
+        <span style="margin-left:auto">吞吐 <b id="rate" style="color:hsl(var(--fg))">0</b> 事件/分</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════ STATS ════════ -->
+<section class="wrap">
+  <div class="stats reveal">
+    <div class="stat"><div class="num gradient-text" data-count="30" data-suffix="+">0</div><div class="lbl">内置工具模块</div></div>
+    <div class="stat"><div class="num gradient-text" data-count="100" data-suffix="%">0</div><div class="lbl">本地运行 · 隐私优先</div></div>
+    <div class="stat"><div class="num gradient-text" data-count="5" data-suffix=" 类">0</div><div class="lbl">能力域全覆盖</div></div>
+    <div class="stat"><div class="num gradient-text" data-count="0" data-suffix=" KB">0</div><div class="lbl">多余数据上传</div></div>
+  </div>
+</section>
+
+<!-- ════════ FEATURES ════════ -->
+<section class="block" id="features">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Capabilities</span>
+      <h2>一个工作台，统管<span class="gradient-text">五大能力域</span></h2>
+      <p>从文件变更追踪到系统治理，从安全防御到开发提效——AgentSC 把零散的系统工具收拢成一套一致的体验。</p>
+    </div>
+
+    <div class="bento">
+      <!-- 概览·分析洞察 -->
+      <article class="feat card card-glow span3 reveal">
+        <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+        <h3>概览 · 分析洞察</h3>
+        <p>以数据大屏实时掌握磁盘动态，用 AI 把海量变更翻译成可读的结论。</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> 数据大屏：可视化磁盘活动与趋势</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> 追踪路径：选定目录，逐文件审计</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> 占用分析：定位空间黑洞</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> AI 洞察：自然语言解读变更</li>
+        </ul>
+      </article>
+
+      <!-- 清理优化 -->
+      <article class="feat card card-glow span3 reveal" data-d="1">
+        <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg></div>
+        <h3>清理优化</h3>
+        <p>智能识别冗余，定时与 AI 双引擎协同，释放每一寸空间。</p>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> AI 清理：语义判断可删项</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> 定时清理：规则化自动治理</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> 排除规则：精准保护重要目录</li>
+        </ul>
+      </article>
+
+      <!-- 系统工具 -->
+      <article class="feat card card-glow span2 reveal" data-d="2">
+        <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></svg></div>
+        <h3>系统工具箱 <span class="tag">12+ 模块</span></h3>
+        <p>启动项、任务管理器、卸载、注册表、WSL、我的电脑——系统治理一站直达。</p>
+      </article>
+
+      <!-- 网络安全 -->
+      <article class="feat card card-glow span2 reveal" data-d="2">
+        <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></div>
+        <h3>网络安全 <span class="tag">需授权</span></h3>
+        <p>流量监控、抓包分析、证书与 IP 追踪，构筑本机网络防线。</p>
+      </article>
+
+      <!-- 开发工具 -->
+      <article class="feat card card-glow span2 reveal" data-d="3">
+        <div class="fic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></div>
+        <h3>开发工具</h3>
+        <p>CLI 管理、本地 Ollama 模型、局域网共享，把开发流也收进同一面板。</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ════════ WORKSPACE MOCK ════════ -->
+<section class="block" id="workspace">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">The Console</span>
+      <h2>一块<span class="gradient-text">为掌控感而生</span>的工作台</h2>
+      <p>真实的界面，零修饰的截图——这就是 AgentSC 每天在你屏幕上呈现的样子。</p>
+    </div>
+
+    <div class="ssg reveal">
+      <!-- 主截图：数据大屏 Dashboard -->
+      <div class="ss ss-main">
+        <div class="ss-bar">
+          <span class="dot" style="background:#ff5f56"></span>
+          <span class="dot" style="background:#ffbd2e"></span>
+          <span class="dot" style="background:#27c93f"></span>
+          <span class="ttl">AgentSC — 数据大屏</span>
+          <span class="tag-pill">Dashboard</span>
+        </div>
+        <img src="screenshot-dashboard.png" alt="AgentSC 数据大屏界面：实时指标卡、磁盘概览、事件监控柱状图与最近变更事件列表" class="ss-img" loading="lazy" />
+        <div class="ss-caption">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          一目了然的磁盘活动全景——今日新增/移除文件、实时监控柱状图、最近变更事件流
+        </div>
+      </div>
+
+      <!-- 截图 2：占用分析 -->
+      <div class="ss reveal" data-d="1">
+        <div class="ss-bar">
+          <span class="dot" style="background:#ff5f56"></span>
+          <span class="dot" style="background:#ffbd2e"></span>
+          <span class="dot" style="background:#27c93f"></span>
+          <span class="ttl">占用分析</span>
+          <span class="tag-pill">Analysis</span>
+        </div>
+        <img src="screenshot-analysis.png" alt="AgentSC 占用分析界面：TreeMap 可视化展示磁盘空间占用分布" class="ss-img" loading="lazy" />
+        <div class="ss-caption">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 21H3V3"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+          TreeMap 可视化，一眼定位空间黑洞
+        </div>
+      </div>
+
+      <!-- 截图 3：排除规则 -->
+      <div class="ss reveal" data-d="2">
+        <div class="ss-bar">
+          <span class="dot" style="background:#ff5f56"></span>
+          <span class="dot" style="background:#ffbd2e"></span>
+          <span class="dot" style="background:#27c93f"></span>
+          <span class="ttl">排除规则</span>
+          <span class="tag-pill">Exclusions</span>
+        </div>
+        <img src="screenshot-exclusions.png" alt="AgentSC 排除规则管理界面：自定义排除路径与备注" class="ss-img" loading="lazy" />
+        <div class="ss-caption">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
+          精准保护重要目录，清理不误伤
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════ HOW IT WORKS ════════ -->
+<section class="block" id="how">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Workflow</span>
+      <h2>三步，把磁盘<span class="gradient-text">交给 AI 看管</span></h2>
+    </div>
+    <div class="steps">
+      <div class="step card reveal">
+        <div class="n">STEP 01</div>
+        <h3>选择追踪路径</h3>
+        <p>勾选需要守护的目录——项目、下载、配置或整块磁盘，精细到子文件夹。</p>
+        <div class="sline"></div>
+      </div>
+      <div class="step card reveal" data-d="1">
+        <div class="n">STEP 02</div>
+        <h3>实时捕获变更</h3>
+        <p>基于文件监听内核，毫秒级记录每一次创建、修改、移动与删除，全程本地落库。</p>
+        <div class="sline"></div>
+      </div>
+      <div class="step card reveal" data-d="2">
+        <div class="n">STEP 03</div>
+        <h3>AI 洞察与清理</h3>
+        <p>AI 把事件流总结成洞察，定位冗余与风险，一键进入清理或安全处置流程。</p>
+        <div class="sline"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════ WHY ════════ -->
+<section class="block" id="why">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Why AgentSC</span>
+      <h2>为什么是<span class="gradient-text"> AgentSC</span></h2>
+      <p>不是又一个清理工具，而是一套以「可解释、可掌控」为核心的系统治理平台。</p>
+    </div>
+
+    <div class="cols">
+      <div class="reason card reveal"><div class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div><h3>隐私优先</h3><p>全部分析在本地完成，无云端依赖，敏感数据不出本机。</p></div>
+      <div class="reason card reveal" data-d="1"><div class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M2 12h20"/></svg></div><h3>AI 驱动</h3><p>本地模型理解变更语义，从「看到事件」到「读懂意图」。</p></div>
+      <div class="reason card reveal" data-d="2"><div class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2"/></svg></div><h3>全栈工具箱</h3><p>30+ 模块覆盖追踪、清理、安全与开发，无需在多软件间切换。</p></div>
+      <div class="reason card reveal" data-d="3"><div class="ric"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div><h3>轻量高性能</h3><p>原生 Electron 架构，常驻资源占用低，老机器也跑得动。</p></div>
+    </div>
+
+    <table class="cmp reveal">
+      <thead><tr><th>能力</th><th class="us">AgentSC</th><th>传统清理软件</th><th>手动管理</th></tr></thead>
+      <tbody>
+        <tr><td>实时文件变更追踪</td><td class="us yes">✓ 毫秒级</td><td class="no">✗</td><td class="no">✗ 靠肉眼</td></tr>
+        <tr><td>AI 语义洞察</td><td class="us yes">✓ 本地模型</td><td class="no">✗</td><td class="no">✗</td></tr>
+        <tr><td>网络抓包 / 安全</td><td class="us yes">✓ 内置</td><td class="no">部分</td><td class="no">✗</td></tr>
+        <tr><td>隐私（零上传）</td><td class="us yes">✓ 100%</td><td class="no">常上报</td><td class="yes">✓</td></tr>
+        <tr><td>统一工作台</td><td class="us yes">✓ 30+ 模块</td><td class="no">单点</td><td class="no">多工具</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ════════ FINAL CTA ════════ -->
+<section class="block" id="download">
+  <div class="wrap">
+    <div class="cta-panel reveal">
+      <span class="eyebrow">Get Started</span>
+      <h2>现在就<span class="gradient-text">掌控你的磁盘</span></h2>
+      <p>免费下载 AgentSC，让 AI 替你盯住每一次文件变动。Windows 10 / 11 原生支持。</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          下载 AgentSC 安装包
+        </a>
+        <a class="btn btn-ghost" href="#features">浏览全部功能</a>
+      </div>
+      <div class="sysreq">v1.0.0 · x64 · NSIS 安装包 · 约 45 MB · 需管理员权限以监控系统目录</div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ════════ FOOTER ════════ -->
+<footer class="foot">
+  <div class="wrap foot-bottom" style="border:none;margin-top:0;padding-top:0"></div>
+  <div class="wrap foot-grid">
+    <div>
+      <a class="brand" href="#top"><span class="mark brand-gradient"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg></span>AgentSC</a>
+      <p class="desc">AI 驱动的磁盘文件变更追踪软件。实时、可视、可解释地治理你的系统。</p>
+    </div>
+    <div><h4>产品</h4><a href="#features">功能模块</a><a href="#workspace">工作台</a><a href="#how">工作原理</a><a href="#download">下载</a></div>
+    <div><h4>能力域</h4><a href="#">分析洞察</a><a href="#">清理优化</a><a href="#">系统工具</a><a href="#">网络安全</a></div>
+    <div><h4>资源</h4><a href="#">文档</a><a href="#">更新日志</a><a href="#">隐私政策</a><a href="#">许可协议</a></div>
+  </div>
+  <div class="wrap foot-bottom">
+    <span>© 2026 AgentSC · 保留所有权利</span>
+    <span class="mono">Made with intent · Windows Native</span>
+  </div>
+</footer>
+
+<script>
+/* ── Nav scroll state ── */
+const nav=document.getElementById('nav');
+const onScroll=()=>nav.classList.toggle('scrolled',window.scrollY>12);
+onScroll();window.addEventListener('scroll',onScroll,{passive:true});
+
+/* ── Accent switch (mirrors in-app theming) ── */
+/* favicon mirrors the active accent via inline SVG — fully self-contained, no external file */
+function favSvg(p1,p2){
+  return `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='${p1}'/><stop offset='1' stop-color='${p2}'/></linearGradient></defs><rect width='24' height='24' rx='5.5' fill='url(#g)'/><g fill='none' stroke='#fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2 2 7l10 5 10-5-10-5Z'/><path d='m2 17 10 5 10-5'/><path d='m2 12 10 5 10-5'/></g></svg>`;
+}
+const favAccents={
+  indigo:['#3b82f6','#22d3ee'],violet:['#8b5cf6','#60a5fa'],blue:['#3b82f6','#22d3ee'],
+  cyan:['#22d3ee','#2dd4bf'],emerald:['#10b981','#2dd4bf'],amber:['#f59e0b','#fb923c'],
+  orange:['#f97316','#fb7185'],rose:['#f43f5e','#a855f7']
+};
+function setFav(a){const c=favAccents[a]||favAccents.indigo;const link=document.querySelector("link[rel~='icon']");if(link)link.href='data:image/svg+xml,'+encodeURIComponent(favSvg(c[0],c[1]));}
+const dots=document.querySelectorAll('.accent-dot');
+dots.forEach(d=>d.addEventListener('click',()=>{
+  const a=d.dataset.accent;
+  document.documentElement.dataset.accent=a;
+  dots.forEach(x=>x.setAttribute('aria-pressed',x===d?'true':'false'));
+  try{localStorage.setItem('agentsc-accent',a)}catch(e){}
+  setFav(a);
+}));
+(function(){try{const s=localStorage.getItem('agentsc-accent');if(s){document.documentElement.dataset.accent=s;dots.forEach(x=>x.setAttribute('aria-pressed',x.dataset.accent===s?'true':'false'));setFav(s);}}catch(e){}})();
+setFav(document.documentElement.dataset.accent||'indigo');
+
+/* ── Reveal on scroll ── */
+const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.12});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+/* ── Count up ── */
+function countUp(el){
+  const target=+el.dataset.count, suf=el.dataset.suffix||'';
+  if(target===0){el.textContent='0'+suf;return}
+  const dur=1400, t0=performance.now();
+  const step=(t)=>{const p=Math.min(1,(t-t0)/dur);const e=1-Math.pow(1-p,3);
+    el.textContent=Math.round(target*e)+suf; if(p<1)requestAnimationFrame(step)};
+  requestAnimationFrame(step);
+}
+const statIO=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){countUp(e.target);statIO.unobserve(e.target)}})},{threshold:.5});
+document.querySelectorAll('[data-count]').forEach(el=>statIO.observe(el));
+
+/* ── Live event stream (hero mock) ── */
+const paths=[
+  ['C:\\Users\\dev\\projects\\app\\src\\main.ts','modify'],
+  ['D:\\Downloads\\report-2026.pdf','create'],
+  ['C:\\Windows\\Temp\\cache_8a.tmp','delete'],
+  ['E:\\Media\\photos\\IMG_2241.jpg','create'],
+  ['C:\\Users\\dev\\.config\\agentsc\\rules.json','modify'],
+  ['D:\\Builds\\agent-v1.0.0.exe','create'],
+  ['C:\\ProgramData\\logs\\sys.log','modify'],
+  ['E:\\Docs\\draft.docx','move'],
+];
+const acts={create:['created','create'],modify:['modified','modify'],delete:['deleted','delete'],move:['moved','move']};
+const icons={
+  create:'<path d="M5 12h14M12 5v14"/>',
+  modify:'<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  delete:'<path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>',
+  move:'<path d="M5 12h14M12 5l7 7-7 7"/>'
+};
+const colors={create:'hsl(var(--success))',modify:'hsl(var(--warning))',delete:'hsl(var(--destructive))',move:'hsl(var(--info))'};
+const stream=document.getElementById('evtStream');
+const now=()=>{const d=new Date();return d.toTimeString().slice(0,8)};
+let rate=0;
+function pushEvt(){
+  const [p,kind]=paths[Math.floor(Math.random()*paths.length)];
+  const [label,chip]=acts[kind];
+  const name=p.split('\\').pop();
+  const row=document.createElement('div');
+  row.className='evt';
+  row.innerHTML=`<div class="ic" style="background:${colors[kind]}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${icons[kind]}</svg></div>
+    <div class="meta"><div class="path">${name}</div><div class="act">${p}</div></div>
+    <div style="text-align:right"><span class="chip ${chip}">${label}</span><div class="time">${now()}</div></div>`;
+  stream.prepend(row);
+  while(stream.children.length>6)stream.removeChild(stream.lastChild);
+  rate+=Math.floor(Math.random()*4)+1;
+  const r=document.getElementById('rate');if(r)r.textContent=rate;
+}
+function seedStream(){for(let i=0;i<5;i++)pushEvt()}
+if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+  seedStream();
+  setInterval(pushEvt,2200);
+  setInterval(()=>{rate=Math.max(0,rate-Math.floor(Math.random()*6))},3000);
+}else{seedStream();}
+
+/* ── Sparkline (hero mock footer) ── */
+const spark=document.getElementById('spark');
+if(spark){for(let i=0;i<14;i++){const b=document.createElement('i');b.style.height=(20+Math.random()*80)+'%';b.style.animationDelay=(i*0.08)+'s';spark.appendChild(b)}}
+
+</script>
+</body>
+</html>

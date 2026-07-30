@@ -1,0 +1,15 @@
+{
+  "name": "Windows 系统清理",
+  "description": "整理自 BleachBit cleaners 与社区 Windows 清理脚本的常见系统垃圾位置。安全项默认开启，高风险项默认关闭，请按需确认后再启用。",
+  "version": "1.0.0",
+  "homepage": "https://github.com/bleachbit/bleachbit",
+  "rules": [
+    { "id": "win-recycle", "name": "回收站", "type": "recycle_bin", "schedule": "0 9 * * *", "enabled": true },
+    { "id": "win-temp", "name": "系统临时文件", "type": "temp_dir", "schedule": "0 3 * * *", "enabled": true },
+    { "id": "win-ie-history", "name": "浏览器历史与最近记录", "type": "ie_history", "schedule": "0 4 * * *", "enabled": true },
+    { "id": "win-windows-temp", "name": "Windows\\Temp 残留", "type": "custom", "target": "%WINDIR%\\Temp", "patterns": "*.tmp,*.log,*.bak,*.old,~*", "schedule": "0 3 * * 1", "enabled": false },
+    { "id": "win-prefetch", "name": "Prefetch 预取文件", "type": "custom", "target": "%WINDIR%\\Prefetch", "patterns": "*.pf", "schedule": "0 4 * * 1", "enabled": false },
+    { "id": "win-update-cache", "name": "Windows 更新缓存", "type": "custom", "target": "%WINDIR%\\SoftwareDistribution\\Download", "patterns": "*", "schedule": "0 4 * * 1", "enabled": false },
+    { "id": "win-logs", "name": "Windows 日志", "type": "custom", "target": "%WINDIR%\\Logs", "patterns": "*.log,*.etl", "schedule": "0 5 * * 1", "enabled": false }
+  ]
+}

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh" data-accent="indigo">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>滚动条美化预览 · AgentSC</title>
+<style>
+:root{
+  --background:222 41% 4.5%; --foreground:214 25% 88%; --muted:223 30% 10%;
+  --muted-foreground:215 15% 55%; --card:222 35% 6.5%; --border:215 20% 18%;
+  --primary:224 76% 56%; --primary-foreground:0 0% 100%; --ring:224 76% 56%;
+  --info:199 89% 48%;
+  --grad-from:224 76% 61%; --grad-via:245 83% 68%; --grad-to:199 89% 55%;
+}
+.light{
+  --background:210 33% 98%; --foreground:215 20% 14%; --muted:210 30% 95%;
+  --muted-foreground:215 15% 47%; --card:0 0% 100%; --border:214 20% 90%;
+  --primary:224 76% 55%; --primary-foreground:0 0% 100%; --ring:224 76% 56%;
+  --info:199 89% 44%;
+}
+:root[data-accent='indigo']{--primary:224 76% 56%;--info:199 89% 48%;--grad-from:224 76% 61%;--grad-via:245 83% 68%;--grad-to:199 89% 55%;}
+:root[data-accent='violet']{--primary:262 83% 64%;--info:280 80% 62%;--grad-from:262 83% 64%;--grad-via:291 78% 68%;--grad-to:212 90% 64%;}
+:root[data-accent='blue']{--primary:217 91% 60%;--info:205 90% 56%;--grad-from:217 91% 62%;--grad-via:224 90% 66%;--grad-to:199 89% 56%;}
+:root[data-accent='cyan']{--primary:199 89% 50%;--info:191 90% 48%;--grad-from:199 89% 52%;--grad-via:190 92% 58%;--grad-to:174 72% 50%;}
+:root[data-accent='emerald']{--primary:160 72% 42%;--info:173 80% 42%;--grad-from:160 72% 44%;--grad-via:152 69% 50%;--grad-to:173 80% 46%;}
+:root[data-accent='amber']{--primary:35 92% 52%;--info:45 93% 50%;--grad-from:35 92% 54%;--grad-via:43 95% 58%;--grad-to:25 95% 55%;}
+:root[data-accent='orange']{--primary:25 95% 55%;--info:38 95% 53%;--grad-from:25 95% 57%;--grad-via:33 96% 60%;--grad-to:14 90% 58%;}
+:root[data-accent='rose']{--primary:346 84% 60%;--info:330 81% 60%;--grad-from:346 84% 62%;--grad-via:330 82% 66%;--grad-to:280 70% 62%;}
+
+/* === 滚动条（与 src/renderer/index.css 完全一致） === */
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background-color:hsl(var(--muted-foreground)/0.16);border-radius:999px;border:3px solid transparent;background-clip:padding-box;transition:background-color .2s ease,box-shadow .2s ease,border-width .2s ease;}
+*:hover::-webkit-scrollbar-thumb{background-color:hsl(var(--muted-foreground)/0.32);background-clip:padding-box;}
+::-webkit-scrollbar-thumb:hover{background-color:hsl(var(--primary)/0.62);border-width:2px;box-shadow:0 0 0 1px hsl(var(--primary)/0.14),0 0 10px hsl(var(--primary)/0.42);background-clip:padding-box;}
+::-webkit-scrollbar-thumb:active{background-color:hsl(var(--primary)/0.82);border-width:2px;background-clip:padding-box;}
+::-webkit-scrollbar-corner{background:transparent;}
+html{scrollbar-width:thin;scrollbar-color:hsl(var(--muted-foreground)/0.32) transparent;}
+.no-scrollbar{scrollbar-width:none;-ms-overflow-style:none;}
+.no-scrollbar::-webkit-scrollbar{width:0;height:0;display:none;}
+@media (prefers-reduced-motion:reduce){::-webkit-scrollbar-thumb{transition:none;}}
+
+/* === 演示布局 === */
+*{box-sizing:border-box;}
+body{margin:0;font-family:'Inter',-apple-system,system-ui,'Segoe UI',Roboto,'Microsoft YaHei',sans-serif;background:hsl(var(--background));color:hsl(var(--foreground));min-height:100vh;padding:28px;line-height:1.5;}
+.toolbar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 18px;margin-bottom:24px;border:1px solid hsl(var(--border));border-radius:16px;background:hsl(var(--card)/0.6);backdrop-filter:blur(12px);}
+.toolbar h1{font-size:15px;margin:0;font-weight:700;margin-right:auto;}
+.seg{display:flex;gap:6px;}
+.btn{cursor:pointer;border:1px solid hsl(var(--border));background:hsl(var(--muted)/0.6);color:hsl(var(--foreground));padding:6px 12px;border-radius:10px;font-size:13px;transition:all .15s;}
+.btn:hover{border-color:hsl(var(--primary)/0.4);}
+.btn.active{background:hsl(var(--primary)/0.18);border-color:hsl(var(--primary)/0.6);color:hsl(var(--primary));}
+.swatches{display:flex;gap:6px;}
+.dot{width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent;}
+.dot.active{border-color:hsl(var(--foreground));}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;}
+.card{background:hsl(var(--card)/0.55);border:1px solid hsl(var(--border)/0.6);border-radius:18px;padding:18px;}
+.card h2{font-size:14px;margin:0 0 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.card h2 .tag{font-size:11px;color:hsl(var(--muted-foreground));font-weight:500;}
+.list{height:240px;overflow:auto;display:flex;flex-direction:column;gap:8px;}
+.row{padding:10px 12px;border-radius:10px;background:hsl(var(--muted)/0.5);font-size:13px;}
+.hrow{display:flex;gap:12px;height:120px;overflow-x:auto;padding-bottom:6px;}
+.hbox{flex:0 0 auto;width:160px;border-radius:12px;background:hsl(var(--muted)/0.5);display:flex;align-items:center;justify-content:center;font-size:13px;}
+.modal{height:260px;overflow:auto;border-radius:14px;border:1px solid hsl(var(--border));background:hsl(var(--muted)/0.3);padding:16px;}
+.modal p{margin:0 0 12px;font-size:13px;color:hsl(var(--muted-foreground));}
+.hint{font-size:12px;color:hsl(var(--muted-foreground));margin-top:6px;}
+.brand{background:linear-gradient(135deg,hsl(var(--grad-from)),hsl(var(--grad-via)) 50%,hsl(var(--grad-to)));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <h1>滚动条美化预览 · <span class="brand">AgentSC</span></h1>
+  <div class="seg" id="themeSeg">
+    <button class="btn active" data-theme="dark">深色</button>
+    <button class="btn" data-theme="light">浅色</button>
+  </div>
+  <div class="swatches" id="swatches"></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>垂直列表 <span class="tag">hover 容器 → 灰；hover 滑块 → 主色柔光</span></h2>
+    <div class="list" id="list"></div>
+    <p class="hint">把鼠标移到列表上，滑块会变灰；直接移到滑块上则亮起品牌色并带光晕。</p>
+  </div>
+
+  <div class="card">
+    <h2>横向滚动 <span class="tag">水平滚动条同款</span></h2>
+    <div class="hrow" id="hrow"></div>
+    <p class="hint">左右滑动，水平滚动条与垂直完全一致。</p>
+  </div>
+
+  <div class="card">
+    <h2>弹窗内容 <span class="tag">modal 内滚动</span></h2>
+    <div class="modal" id="modal"></div>
+    <p class="hint">弹窗内的滚动条也是同一套规则。</p>
+  </div>
+</div>
+<script>
+const list=document.getElementById('list');
+for(let i=1;i<=40;i++){const r=document.createElement('div');r.className='row';r.textContent='列表项 #'+i+' — 系统可滚动区域示例';list.appendChild(r);}
+const hrow=document.getElementById('hrow');
+for(let i=1;i<=16;i++){const b=document.createElement('div');b.className='hbox';b.textContent='卡片 '+i;hrow.appendChild(b);}
+const modal=document.getElementById('modal');
+modal.innerHTML='<p>这是一段会被滚动的内容……</p>';
+for(let i=0;i<14;i++){const p=document.createElement('p');p.textContent='弹窗内第 '+(i+1)+' 段示例文本，用来撑出垂直滚动条，验证 modal 区域同样应用了统一的滚动条样式。';modal.appendChild(p);}
+const themeSeg=document.getElementById('themeSeg');
+themeSeg.addEventListener('click',e=>{const b=e.target.closest('.btn');if(!b)return;const t=b.dataset.theme;document.documentElement.classList.toggle('light',t==='light');[...themeSeg.children].forEach(x=>x.classList.toggle('active',x===b));});
+const accents=[['indigo','224 76% 56%'],['violet','262 83% 64%'],['blue','217 91% 60%'],['cyan','199 89% 50%'],['emerald','160 72% 42%'],['amber','35 92% 52%'],['orange','25 95% 55%'],['rose','346 84% 60%']];
+const sw=document.getElementById('swatches');
+accents.forEach(([name,color],idx)=>{const d=document.createElement('div');d.className='dot'+(idx===0?' active':'');d.style.background='hsl('+color+')';d.title=name;d.onclick=()=>{document.documentElement.setAttribute('data-accent',name);[...sw.children].forEach(x=>x.classList.remove('active'));d.classList.add('active');};sw.appendChild(d);});
+</script>
+</body>
+</html>

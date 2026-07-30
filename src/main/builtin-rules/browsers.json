@@ -1,0 +1,13 @@
+{
+  "name": "浏览器缓存清理",
+  "description": "针对 Chrome / Edge / Firefox 的缓存目录做精准清理（仅删除缓存文件，不触碰配置与登录态）。整理自 BleachBit 浏览器清理规则。",
+  "version": "1.0.0",
+  "homepage": "https://github.com/bleachbit/bleachbit/tree/master/cleaners",
+  "rules": [
+    { "id": "chrome-cache", "name": "Chrome 缓存", "type": "custom", "target": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Cache", "patterns": "*", "schedule": "0 2 * * *", "enabled": true },
+    { "id": "chrome-code-cache", "name": "Chrome 代码缓存", "type": "custom", "target": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Code Cache", "patterns": "*", "schedule": "0 2 * * 0", "enabled": false },
+    { "id": "edge-cache", "name": "Edge 缓存", "type": "custom", "target": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Cache", "patterns": "*", "schedule": "0 2 * * *", "enabled": true },
+    { "id": "firefox-cache", "name": "Firefox 缓存", "type": "custom", "target": "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles", "patterns": "*.cache", "schedule": "0 2 * * 0", "enabled": false },
+    { "id": "browser-cache-all", "name": "全部浏览器缓存（通用）", "type": "browser_cache", "schedule": "0 2 * * *", "enabled": false }
+  ]
+}

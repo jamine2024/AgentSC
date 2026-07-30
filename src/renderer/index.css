@@ -1,0 +1,442 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ── Dark Theme (Default) ───────────────────────────────
+     *  Design system: Deep slate-blue base + Vivid indigo primary + Cyan accent
+     *  Inspired by: Linear, Raycast, Vercel dashboard aesthetics
+     * ────────────────────────────────────────────────────── */
+
+    /* === Background Surfaces (depth hierarchy) === */
+    --background:          222 41% 4.5%;     /* deepest: #0b0f19 */
+    --foreground:          214  25% 88%;      /* primary text: #e2e8f0 */
+    --muted:               223 30% 10%;       /* muted surface */
+    --muted-foreground:    215  15% 55%;      /* secondary text: #94a3b8 */
+    --popover:             222 38% 6%;        /* dropdown/tooltip bg */
+    --popover-foreground:  214  20% 78%;      /* popover text */
+
+    /* === Cards & Elevated Surfaces === */
+    --card:                222 35% 6.5%;      /* card base */
+    --card-foreground:     214  25% 88%;      /* card text */
+
+    /* === Borders & Inputs === */
+    --border:              215 20% 18%;       /* subtle border */
+    --input:               215  20% 18%;       /* input border */
+    --ring:                224  76% 56%;      /* focus ring (indigo glow) */
+
+    /* === Primary Brand: Vibrant Indigo === */
+    --primary:             224  76% 56%;      /* #6366f1 → enhanced to #818cf8 */
+    --primary-foreground:  220  83% 97%;      /* white-ish on primary */
+
+    /* === Secondary & Accent === */
+    --secondary:           220  28% 12%;       /* subtle elevated */
+    --secondary-foreground:214  20% 82%;
+    --accent:              218  35% 16%;       /* accent surface */
+    --accent-foreground:   214  20% 82%;
+
+    /* === Semantic Colors === */
+    --destructive:         0   72% 51%;        /* red */
+    --destructive-foreground: 0  0%  98%;
+    --success:             160 67% 45%;        /* emerald green */
+    --warning:             38  92% 52%;        /* amber */
+    --info:                199 89% 48%;        /* cyan */
+
+    /* === Shape === */
+    --radius: 0.75rem;
+
+    /* === Brand Gradient Stops (overridden per [data-accent]) === */
+    --grad-from: 224 76% 61%;
+    --grad-via:  245 83% 68%;
+    --grad-to:   199 89% 55%;
+  }
+
+  .light {
+    /* ── Light Theme ───────────────────────────────────
+     *  Clean warm-white base + Rich indigo primary
+     * ──────────────────────────────────────────────── */
+
+    --background:          210  33% 98%;      /* #f8fafc-ish warmer */
+    --foreground:          215  20% 14%;      /* #1e293b */
+    --muted:               210  30% 95%;
+    --muted-foreground:    215  15% 47%;
+    --popover:             0   0% 100%;
+    --popover-foreground:  215  20% 14%;
+    --card:                0   0% 100%;
+    --card-foreground:     215  20% 14%;
+    --border:              214  20% 90%;
+    --input:               214  20% 90%;
+    --ring:                224  76% 56%;
+
+    --primary:             224  76% 55%;        /* rich indigo */
+    --primary-foreground:  0   0% 100%;
+
+    --secondary:           210  30% 94%;
+    --secondary-foreground: 215  20% 14%;
+    --accent:              210  30% 94%;
+    --accent-foreground:   215  20% 14%;
+
+    --destructive:         0   84% 61%;
+    --destructive-foreground: 0  0% 100%;
+    --success:             160 65% 45%;
+    --warning:             38  92% 50%;
+    --info:                199 89% 44%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    @apply h-full w-full bg-background text-foreground antialiased;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  body {
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ACCENT SCHEMES — Brand color presets
+   Applied via [data-accent="..."] on <html>, independent of the
+   dark/light mode axis. Each preset overrides the brand tokens
+   (--primary / --ring / --info) and the brand gradient stops.
+   Kept unlayered so it reliably wins over the :root / .light base.
+   ══════════════════════════════════════════════════════════════ */
+
+:root[data-accent='indigo'] {
+  --primary: 224 76% 56%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 224 76% 56%;
+  --info: 199 89% 48%;
+  --grad-from: 224 76% 61%;
+  --grad-via:  245 83% 68%;
+  --grad-to:   199 89% 55%;
+}
+
+:root[data-accent='violet'] {
+  --primary: 262 83% 64%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 262 83% 64%;
+  --info: 280 80% 62%;
+  --grad-from: 262 83% 64%;
+  --grad-via:  291 78% 68%;
+  --grad-to:   212 90% 64%;
+}
+
+:root[data-accent='blue'] {
+  --primary: 217 91% 60%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 217 91% 60%;
+  --info: 205 90% 56%;
+  --grad-from: 217 91% 62%;
+  --grad-via:  224 90% 66%;
+  --grad-to:   199 89% 56%;
+}
+
+:root[data-accent='cyan'] {
+  --primary: 199 89% 50%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 199 89% 50%;
+  --info: 191 90% 48%;
+  --grad-from: 199 89% 52%;
+  --grad-via:  190 92% 58%;
+  --grad-to:   174 72% 50%;
+}
+
+:root[data-accent='emerald'] {
+  --primary: 160 72% 42%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 160 72% 42%;
+  --info: 173 80% 42%;
+  --grad-from: 160 72% 44%;
+  --grad-via:  152 69% 50%;
+  --grad-to:   173 80% 46%;
+}
+
+:root[data-accent='amber'] {
+  --primary: 35 92% 52%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 35 92% 52%;
+  --info: 45 93% 50%;
+  --grad-from: 35 92% 54%;
+  --grad-via:  43 95% 58%;
+  --grad-to:   25 95% 55%;
+}
+
+:root[data-accent='orange'] {
+  --primary: 25 95% 55%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 25 95% 55%;
+  --info: 38 95% 53%;
+  --grad-from: 25 95% 57%;
+  --grad-via:  33 96% 60%;
+  --grad-to:   14 90% 58%;
+}
+
+:root[data-accent='rose'] {
+  --primary: 346 84% 60%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 346 84% 60%;
+  --info: 330 81% 60%;
+  --grad-from: 346 84% 62%;
+  --grad-via:  330 82% 66%;
+  --grad-to:   280 70% 62%;
+}
+
+/* Accent-driven brand gradient (logo, hero accents) — follows the active scheme */
+.brand-gradient {
+  background-image: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--grad-via)) 55%, hsl(var(--info)) 100%);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   GLASS MORPHISM — Refined multi-layer glass effect
+   ══════════════════════════════════════════════════════════════ */
+
+.glass {
+  background: hsl(var(--card) / 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid hsl(var(--border) / 0.4);
+}
+
+.light .glass {
+  background: hsl(var(--card) / 0.82);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-color: hsl(var(--border) / 0.6);
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.04), inset 0 1px 0 0 rgb(255 255 255 / 0.5);
+}
+
+/* Glass hover state — lift effect */
+.glass-hover:hover {
+  background: hsl(var(--card) / 0.75);
+  border-color: hsl(var(--primary) / 0.15);
+  box-shadow:
+    0 4px 24px -4px hsl(var(--primary) / 0.08),
+    0 0 0 1px hsl(var(--primary) / 0.06) inset;
+  transform: translateY(-1px);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   GRADIENT TEXT — Brand gradient for headings/logos
+   ══════════════════════════════════════════════════════════════ */
+
+.gradient-text {
+  background: linear-gradient(135deg,
+    hsl(var(--grad-from)) 0%,
+    hsl(var(--grad-via)) 50%,
+    hsl(var(--grad-to)) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-warm {
+  background: linear-gradient(135deg, #6366f1 0%, #ec4899 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   BACKGROUND PATTERNS — Subtle dot grid (replaces old grid lines)
+   ══════════════════════════════════════════════════════════════ */
+
+.grid-bg {
+  background-image:
+    radial-gradient(circle at 1px 1px, hsl(var(--border) / 0.3) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+.light .grid-bg {
+  background-image:
+    radial-gradient(circle at 1px 1px, hsl(var(--border) / 0.4) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SCROLLBARS — Unified, slim, brand-themed.
+   Applies to EVERY scrollable element in the app (dark & light,
+   all accent schemes). Track is always invisible; the thumb is a
+   whisper-thin pill that is faintly present so the user always
+   knows a region scrolls, then strengthens on interaction.
+     • idle        → very faint muted pill
+     • hover region→ stronger soft gray
+     • hover thumb → brand --primary + gentle halo
+     • dragging    → deeper --primary
+   Firefox mirrors this with a thin always-visible thumb.
+   ══════════════════════════════════════════════════════════════ */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  /* the 3px transparent border carves the slim pill look */
+  background-color: hsl(var(--muted-foreground) / 0.16);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease, border-width 0.2s ease;
+}
+
+/* Strengthen the thumb while the scrollable region is hovered */
+*:hover::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--muted-foreground) / 0.32);
+  background-clip: padding-box;
+}
+
+/* Hover directly on the thumb → brand color + soft halo */
+::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--primary) / 0.62);
+  border-width: 2px;
+  box-shadow:
+    0 0 0 1px hsl(var(--primary) / 0.14),
+    0 0 10px hsl(var(--primary) / 0.42);
+  background-clip: padding-box;
+}
+
+/* While actively dragging the thumb */
+::-webkit-scrollbar-thumb:active {
+  background-color: hsl(var(--primary) / 0.82);
+  border-width: 2px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox — thin scrollbar with a subtle, always-visible thumb */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.32) transparent;
+}
+
+/* Utility: keep scrolling but hide the bar (inline tabs, cards, etc.) */
+.no-scrollbar {
+  scrollbar-width: none;            /* Firefox */
+  -ms-overflow-style: none;          /* legacy Edge */
+}
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Respect users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  ::-webkit-scrollbar-thumb {
+    transition: none;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   UTILITY CLASSES — New design tokens
+   ══════════════════════════════════════════════════════════════ */
+
+/* Brand glow effect for active elements */
+.glow-primary {
+  box-shadow:
+    0 0 20px -4px hsl(var(--primary) / 0.3),
+    0 0 40px -8px hsl(var(--primary) / 0.15);
+}
+
+/* Surface elevation levels */
+.surface-1 { background: hsl(var(--card) / 0.5); }
+.surface-2 { background: hsl(var(--card) / 0.65); }
+.surface-3 { background: hsl(var(--card) / 0.8); }
+
+/* Gradient border utility */
+.gradient-border {
+  position: relative;
+}
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, hsl(var(--primary) / 0.4), hsl(var(--info) / 0.3), transparent);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Animated shimmer for loading states */
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    hsl(var(--muted) / 0.5) 0%,
+    hsl(var(--muted) / 0.8) 50%,
+    hsl(var(--muted) / 0.5) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Splash screen — indeterminate progress bar (slides left → right, loops) */
+.splash-bar {
+  animation: indeterminate 1.3s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(360%); }
+}
+
+/* Selection color */
+::selection {
+  background: hsl(var(--primary) / 0.25);
+  color: hsl(var(--foreground));
+}
+
+/* Focus visible ring enhancement */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--primary) / 0.4);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   WINDOW DRAG REGION — Electron frameless window drag handles
+   ══════════════════════════════════════════════════════════════ */
+
+.app-region-drag {
+  -webkit-app-region: drag;
+}
+
+.app-region-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   LIGHT-MODE FIX — AI Cleanup action bar & confirm button
+   In light mode the page background is near-white, so the
+   sticky action bar and the primary "Clean Selected" button
+   need a solid surface + shadow to stay legible.
+   ══════════════════════════════════════════════════════════════ */
+.light .cleanup-actionbar {
+  background: hsl(var(--card));
+  border-color: hsl(var(--border));
+  box-shadow: 0 12px 32px -12px rgb(15 23 42 / 0.18);
+}
+.light .cleanup-confirm {
+  box-shadow: 0 6px 16px -6px hsl(var(--primary) / 0.45);
+}

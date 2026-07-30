@@ -1,0 +1,40 @@
+{
+  "name": "示例清理规则源",
+  "description": "演示用规则清单：包含系统内置类型与带文件模式匹配的自定义规则",
+  "version": "1.0.0",
+  "homepage": "https://example.com",
+  "rules": [
+    {
+      "id": "win-temp",
+      "name": "Windows 临时目录",
+      "type": "temp_dir",
+      "schedule": "0 0 * * *",
+      "enabled": true
+    },
+    {
+      "id": "edge-cache",
+      "name": "Edge 浏览器缓存",
+      "type": "browser_cache",
+      "schedule": "0 3 * * *",
+      "enabled": true
+    },
+    {
+      "id": "npm-cache",
+      "name": "npm 缓存（仅 .cache/.tmp 文件）",
+      "type": "custom",
+      "target": "%LOCALAPPDATA%/npm-cache",
+      "patterns": "*.cache,*.tmp",
+      "schedule": "0 4 * * 0",
+      "enabled": false
+    },
+    {
+      "id": "downloads-installers",
+      "name": "下载目录中的安装包",
+      "type": "custom",
+      "target": "%USERPROFILE%/Downloads",
+      "patterns": "*.exe,*.msi,*.zip",
+      "schedule": "0 2 1 * *",
+      "enabled": false
+    }
+  ]
+}
