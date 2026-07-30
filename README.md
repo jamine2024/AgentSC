@@ -1,6 +1,10 @@
 # AgentSC 架构与功能地图
 
 > 本文档面向开发者、贡献者与项目维护者，系统说明 AgentSC 的整体架构、技术选型、模块划分、数据模型与核心流程。
+<img width="1426" height="893" alt="2955b87539fa8e8859089202a2c238fa" src="https://github.com/user-attachments/assets/1ce82b36-004c-488f-8235-559ced602089" />
+<img width="1426" height="893" alt="246e28353493da2e00f44855d3d5cbde" src="https://github.com/user-attachments/assets/a5966e12-19f2-4cca-a3ea-5268fcce37db" />
+<img width="1426" height="893" alt="cb894a717c44ea4b94dfc97fb8d343ac" src="https://github.com/user-attachments/assets/0e959b25-37a2-463b-8b5c-1db789a90aaf" />
+<img width="1182" height="820" alt="adbb5d996683fa3771f45280edbd2fec" src="https://github.com/user-attachments/assets/39037edd-3556-430c-b46e-c0bdcf2806dc" />
 
 ---
 
