@@ -33,3 +33,4 @@ data
 screenshots/*.png
 agentsc-dashboard*.png
 release"release/win-unpacked/AgentSC.exe" 
+release/
