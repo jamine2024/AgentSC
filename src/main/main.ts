@@ -80,7 +80,7 @@ import {
 } from './cert'
 import { buildScanReportTxt, type ScanReportPayload } from './scanReport'
 import { startWatching, stopWatching, setMainWindow, getWatcherStatus } from './watcher'
-import { getProcessTrackerStatus, startProcessTracking } from './processTracker'
+import { getProcessTrackerStatus, startProcessTracking, stopProcessTracking } from './processTracker'
 import {
   startNetworkTracer,
   stopNetworkTracer,
@@ -510,9 +510,37 @@ function createWindow() {
     mainWindow.loadFile(path.join(RENDERER_DIST, 'index.html'))
   }
 
+  // 加载失败时（如构建产物损坏），显示错误页并展示窗口
+  mainWindow.webContents.on('did-fail-load', (_event, code, desc) => {
+    logToDb('error', 'window', '页面加载失败', `${code}: ${desc}`)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.loadURL(`data:text/html;charset=utf-8,<h1>页面加载失败 (${code})</h1><p>${encodeURIComponent(desc)}</p><p>请尝试重启应用或重新安装。`)
+      mainWindow.show()
+    }
+  })
+
+  // 捕获渲染进程控制台错误，写入 DB 日志
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) {
+      logToDb(level >= 3 ? 'error' : 'warn', 'renderer', `${message}`, `${sourceId}:${line}`)
+    }
+  })
+
+  // 捕获渲染进程未捕获异常
+  mainWindow.webContents.on('unresponsive', () => {
+    logToDb('error', 'renderer', '渲染进程无响应', '页面可能已崩溃')
+  })
+
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
   })
+
+  // 兜底：5 秒后如果窗口还没显示，强制显示（防止 ready-to-show 永不触发）
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show()
+    }
+  }, 5_000)
 
   // 关闭窗口时，根据当前托盘设置决定行为
   mainWindow.on('close', (event) => {
@@ -529,12 +557,31 @@ function createWindow() {
 
 // 声明 isQuitting - 使用模块级变量
 app.on('window-all-closed', () => {
+  // 停止监控 & 关闭 DB
   stopWatching()
+  stopProcessTracking()
   closeDb()
-  // 如果没有启用托盘，则退出
-  if (!getMinimizeToTraySetting() || process.platform === 'darwin') {
-    if (process.platform !== 'darwin') app.quit()
+  // 在 Windows/Linux 上，所有窗口关闭后强制退出进程
+  // 不检查托盘设置：用户从托盘"退出"时 isQuitting=true 已确保窗口可关；
+  // 窗口全部关完还不退出 → 就是进程残留 bug
+  if (process.platform !== 'darwin') {
+    app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  // before-quit 在 app.quit() 开始时触发，比 will-quit 早
+  // 这里确保 isQuitting 标记已设置（以防其他途径触发 quit）
+  isQuitting = true
+})
+
+app.on('will-quit', () => {
+  // 清理所有会阻止进程退出的资源
+  globalShortcut.unregisterAll()
+  stopWatching()
+  stopProcessTracking()
+  stopNetworkTracer()
+  closeDb()
 })
 
 // GPU 硬件加速界面渲染：必须在 app.ready 之前决定，运行时无法动态切换，需重启生效。
@@ -559,13 +606,26 @@ app.whenReady().then(() => {
   } catch {
     /* ignore */
   }
-  app.on('will-quit', () => {
-    try {
-      globalShortcut.unregisterAll()
-    } catch {
-      /* ignore */
-    }
-  })
+
+  // 调试快捷键：F12 / Ctrl+Shift+I 打开 DevTools（开发与生产均可用）
+  try {
+    globalShortcut.register('F12', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.toggleDevTools()
+      }
+    })
+  } catch {
+    /* ignore */
+  }
+  try {
+    globalShortcut.register('CommandOrControl+Shift+I', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.toggleDevTools()
+      }
+    })
+  } catch {
+    /* ignore */
+  }
 
   // 数据库滚动清理：防止 file_events / app_logs 表无界膨胀，长时运行后拖高内存与磁盘占用。
   const runDbPruning = () => {

@@ -748,8 +748,8 @@ export default function Dashboard() {
 
       {/* ── Top Stats Grid ───────────────────────────────────── */}
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <StatCard label={t('dashboard.today_created')} value={stats.created_count.toLocaleString()} sub={`${formatBytes(stats.created_bytes)}`} icon={FileSearch} tone="success" live />
-        <StatCard label={t('dashboard.today_deleted')} value={stats.deleted_count.toLocaleString()} sub={`${t('dashboard.freed')} ${formatBytes(stats.deleted_bytes)}`} icon={Trash2} tone="destructive" live />
+        <StatCard label={t('dashboard.today_created')} value={stats?.created_count?.toLocaleString() ?? '0'} sub={`${formatBytes(stats?.created_bytes ?? 0)}`} icon={FileSearch} tone="success" live />
+        <StatCard label={t('dashboard.today_deleted')} value={stats?.deleted_count?.toLocaleString() ?? '0'} sub={`${t('dashboard.freed')} ${formatBytes(stats?.deleted_bytes ?? 0)}`} icon={Trash2} tone="destructive" live />
         <StatCard label={t('dashboard.events_per_min')} value={eventRate.toString()} sub={t('dashboard.realtime_fluctuation')} icon={Activity} tone="accent" live />
         <StatCard label={t('dashboard.monitored_disks')} value={disks.length.toString()} sub={t('dashboard.auto_discovered')} icon={Eye} tone="primary" />
       </section>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { Sparkles } from 'lucide-react'
 import { Sidebar, navItems } from './components/Sidebar'
 import { Header } from './components/Header'
@@ -94,6 +94,38 @@ export interface AiInsightsResult {
   anomalies: Array<{ title: string; description: string; severity: 'low' | 'medium' | 'high' }>
   suggestions: Array<{ title: string; description: string; action: string }>
   error?: string
+}
+
+export class AppErrorBoundary extends Component<{ children: ReactNode }> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[AppErrorBoundary]', error, info.componentStack)
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-black text-white p-8">
+          <div className="text-4xl">⚠</div>
+          <h1 className="text-xl font-bold">应用运行时错误</h1>
+          <pre className="max-w-lg text-sm text-red-400/80 whitespace-pre-wrap text-center">{this.state.error.message}</pre>
+          <pre className="max-w-lg text-xs text-white/40 whitespace-pre-wrap text-center">{this.state.error.stack?.split('\n').slice(1, 4).join('\n')}</pre>
+          <button
+            className="mt-4 rounded-lg bg-white/10 px-6 py-2 text-sm hover:bg-white/20 transition-colors"
+            onClick={() => {
+              this.setState({ error: null })
+              window.location.reload()
+            }}
+          >
+            重新加载
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }
 
 export default function App() {
