@@ -206,6 +206,15 @@ import {
 import { packetCapture } from './packetCapture'
 import { getAtomicReference, resyncSystemClock } from './timeSync'
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 process.env.APP_ROOT = path.join(__dirname, '../..')
@@ -514,7 +523,7 @@ function createWindow() {
   mainWindow.webContents.on('did-fail-load', (_event, code, desc) => {
     logToDb('error', 'window', '页面加载失败', `${code}: ${desc}`)
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.loadURL(`data:text/html;charset=utf-8,<h1>页面加载失败 (${code})</h1><p>${encodeURIComponent(desc)}</p><p>请尝试重启应用或重新安装。`)
+      mainWindow.loadURL(`data:text/html;charset=utf-8,<h1>页面加载失败 (${code})</h1><p>${escapeHtml(desc)}</p><p>请尝试重启应用或重新安装。`)
       mainWindow.show()
     }
   })
