@@ -32,4 +32,4 @@ data
 # Screenshots / temp
 screenshots/*.png
 agentsc-dashboard*.png
-release
+release"release/win-unpacked/AgentSC.exe" 
