@@ -112,7 +112,12 @@ export default function NetworkTracer() {
 
   useEffect(() => {
     if (!autoRefresh) return
-    const id = setInterval(() => void poll(), refreshMs)
+    // 2s 轮询一次全量连接表；页面不可见时停掉，否则主进程会被持续采样
+    // （network:* 同时是采样器的存活心跳，不可见时也不必续命）。
+    const id = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      void poll()
+    }, refreshMs)
     return () => clearInterval(id)
   }, [autoRefresh, refreshMs, poll])
 

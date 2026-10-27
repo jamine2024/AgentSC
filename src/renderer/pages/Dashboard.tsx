@@ -68,13 +68,20 @@ function LiveDot() {
 
 // ─── Real-time Event Rate Wave ────────────────────────────────────
 
+// 波形柱高必须由 rate 确定性地推导：原实现每次 rate 变化都用 Math.random()
+// 重新洗牌，柱子高度在动画中途被改写，触发 16 个元素逐个重排重绘，
+// 看上去是"一直在抖"，也白白消耗渲染帧。
 const EventWave = memo(function EventWave({ rate }: { rate: number }) {
   const bars = useMemo(() => {
     const intensity = Math.min(rate / 30, 1)
-    return Array.from({ length: 16 }, (_, i) => ({
-      height: 0.3 + Math.sin((i / 16) * Math.PI * 2) * 0.35 * intensity + Math.random() * 0.15 * intensity,
-      delay: (i / 16) * 1.2,
-    }))
+    return Array.from({ length: 16 }, (_, i) => {
+      // 用正弦叠加固定相位，形成稳定的波形起伏（无随机数）
+      const wobble = Math.sin(i * 1.7) * 0.08 + Math.sin(i * 0.6 + 1.2) * 0.06
+      return {
+        height: 0.3 + Math.sin((i / 16) * Math.PI * 2) * 0.35 * intensity + wobble * intensity,
+        delay: (i / 16) * 1.2,
+      }
+    })
   }, [rate])
 
   return (
@@ -143,7 +150,7 @@ const StatCard = memo(function StatCard({ label, value, sub, icon: Icon, tone = 
 
 // ─── Event Row ─────────────────────────────────────────────────────
 
-function EventRow({ event, isNew }: { event: FileEvent; isNew: boolean }) {
+const EventRow = memo(function EventRow({ event, isNew }: { event: FileEvent; isNew: boolean }) {
   const { t } = useI18n()
   const typeConfig = {
     created:  { label: t('event.created'),  class: 'bg-emerald-500/12 text-emerald-400 border border-emerald-500/20' },
@@ -156,7 +163,10 @@ function EventRow({ event, isNew }: { event: FileEvent; isNew: boolean }) {
     <div
       className={cn(
         'group flex items-center justify-between border-b border-white/[0.04] py-2.5 last:border-0 transition-colors duration-200 hover:bg-white/[0.02]',
-        isNew ? 'animate-slide-down bg-gradient-to-r from-primary/[0.03] via-transparent to-transparent' : 'animate-fade-in',
+        // 只给「刚到达」的行加动画。之前 else 分支挂了 animate-fade-in，导致 isNew
+        // 在 1.5s 后翻回 false 时整行再播一次淡入 —— 每批事件都会让列表二次闪动，
+        // 同时也是 50 行 × 每帧动画的额外合成开销。
+        isNew && 'animate-slide-down bg-gradient-to-r from-primary/[0.03] via-transparent to-transparent',
       )}
     >
       <div className="flex items-center gap-3 overflow-hidden min-w-0">
@@ -184,7 +194,7 @@ function EventRow({ event, isNew }: { event: FileEvent; isNew: boolean }) {
       </div>
     </div>
   )
-}
+})
 
 // ─── AI Mini Card ─────────────────────────────────────────────────
 
@@ -597,11 +607,16 @@ export default function Dashboard() {
     }
   }, [api])
 
-  // 事件驱动刷新：节流（保证下限）+ 最大延迟合并，且仅在页面可见时拉取。
+  // 事件驱动刷新：自适应节流。事件流活跃时每 2s 刷新一次（与旧版一致）；
+  // 无事件时降到 12s 慢刷新 —— 空闲时看板数据基本不变，2s 轮询等于让主进程
+  // 每秒都在空跑 4 个聚合查询 + 整页 recharts 重渲染。
   // 原纯 debounce 在持续事件流下会因定时器不断被重置而永不触发，导致实时统计
-  // 卡在旧值；改为基于时间戳的节流后，无论事件是否持续，每 2s 至少刷新一次。
-  const REFRESH_INTERVAL = 2000
+  // 卡在旧值；因此保留基于时间戳的节流，只是间隔随事件活跃度切换。
+  const REFRESH_INTERVAL_ACTIVE = 2000   // 事件流活跃时的刷新下限
+  const REFRESH_INTERVAL_IDLE = 12000    // 无事件时的慢刷新
+  const EVENT_IDLE_THRESHOLD_MS = 10000  // 超过 10s 无新事件视为空闲
   const lastRefreshRef = useRef(0)
+  const lastEventAtRef = useRef(0)
   const runRefresh = useCallback(() => {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
     loadStats()
@@ -612,15 +627,19 @@ export default function Dashboard() {
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
+    const interval =
+      Date.now() - lastEventAtRef.current < EVENT_IDLE_THRESHOLD_MS
+        ? REFRESH_INTERVAL_ACTIVE
+        : REFRESH_INTERVAL_IDLE
     const elapsed = Date.now() - lastRefreshRef.current
-    if (elapsed >= REFRESH_INTERVAL) {
+    if (elapsed >= interval) {
       lastRefreshRef.current = Date.now()
       runRefresh()
     } else {
       refreshTimerRef.current = setTimeout(() => {
         lastRefreshRef.current = Date.now()
         runRefresh()
-      }, REFRESH_INTERVAL - elapsed)
+      }, interval - elapsed)
     }
   }, [runRefresh])
 
@@ -660,44 +679,66 @@ export default function Dashboard() {
     // AI 摘要延迟加载，避免阻塞关键首屏数据
     const aiTimeout = setTimeout(() => { loadAiSummary().catch(() => {}) }, 600)
 
+    // 事件流入合并：主进程 500ms 一批推送，批次密集时若每个批次都立刻 setState，
+    // 一帧内可能连续触发多次整表重渲染（50 行 × 多个 state）。这里先攒进 ref，
+    // 用 rAF 合并到「每帧最多一次」提交，事件风暴下渲染压力从 O(批次) 降到 O(帧)。
+    let pending: FileEvent[] = []
+    let flushScheduled = false
+    let newIdsTimer: ReturnType<typeof setTimeout> | null = null
+
+    const commitPending = () => {
+      flushScheduled = false
+      if (pending.length === 0) return
+      const incoming = pending
+      pending = []
+      lastEventAtRef.current = Date.now()
+      const ids = new Set(incoming.map((e) => `${e.path}-${e.recorded_at}`))
+      setEvents((prev) => [...incoming, ...prev].slice(0, 50))
+      setNewEventIds(ids)
+      setEventRate((r) => Math.min(r + incoming.length, 999))
+      if (newIdsTimer) clearTimeout(newIdsTimer)
+      newIdsTimer = setTimeout(() => setNewEventIds(new Set()), 1500)
+      scheduleRefresh()
+    }
+
+    const enqueue = (items: FileEvent[]) => {
+      pending.push(...items)
+      if (flushScheduled) return
+      flushScheduled = true
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(commitPending)
+      } else {
+        setTimeout(commitPending, 16)
+      }
+    }
+
     const onBatchEvent = (...args: unknown[]) => {
       const batch = args[0] as FileEvent[] | undefined
       if (!Array.isArray(batch) || batch.length === 0) return
       eventCounterRef.current += batch.length
-      const ids = new Set(batch.map((e) => `${e.path}-${e.recorded_at}`))
-      setNewEventIds(ids)
-      setTimeout(() => setNewEventIds(new Set()), 1500)
-
-      setEvents((prev) => {
-        const merged = [...batch, ...prev].slice(0, 50)
-        return merged
-      })
-      setEventRate((r) => Math.min(r + batch.length, 999))
-      scheduleRefresh()
+      enqueue(batch)
     }
 
     const onSingleEvent = (...args: unknown[]) => {
       const evt = args[0] as FileEvent
       if (evt && typeof evt === 'object' && 'path' in evt) {
         eventCounterRef.current += 1
-        const id = `${evt.path}-${evt.recorded_at}`
-        setNewEventIds((prev) => new Set(prev).add(id))
-        setTimeout(() => {
-          setNewEventIds((prev) => { const n = new Set(prev); n.delete(id); return n })
-        }, 1500)
-
-        setEvents((prev) => [evt, ...prev].slice(0, 50))
-        setEventRate((r) => Math.min(r + 1, 999))
-        scheduleRefresh()
+        enqueue([evt])
       }
     }
 
     api?.on('file-events-batch', onBatchEvent)
     api?.on('file-event', onSingleEvent)
+    // 空闲心跳：事件稀疏时 scheduleRefresh 不会被调用，靠这个 12s 定时器兜底，
+    // 保证趋势/Top 榜等仍按慢节奏刷新（事件活跃时它调用 scheduleRefresh，
+    // 会被 2s 节流挡住，不会造成重复刷新）
+    const idleHeartbeat = setInterval(scheduleRefresh, REFRESH_INTERVAL_IDLE)
     return () => {
       api?.removeAllListeners('file-events-batch')
       api?.removeAllListeners('file-event')
+      clearInterval(idleHeartbeat)
       clearTimeout(aiTimeout)
+      if (newIdsTimer) clearTimeout(newIdsTimer)
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
     }
   }, [])
@@ -711,9 +752,11 @@ export default function Dashboard() {
     }
   }, [loadAiSummary])
 
+  // 事件速率的自然衰减：只在「确实还有速率」时才 setState。
+  // 原实现每秒无条件写入一次新值（即使已经是 0），空转也会让整个看板每秒重渲染一遍。
   useEffect(() => {
     const t = setInterval(() => {
-      setEventRate((r) => Math.max(0, Math.round(r * 0.7)))
+      setEventRate((r) => (r > 0 ? Math.max(0, Math.round(r * 0.7)) : r))
     }, 1000)
     return () => clearInterval(t)
   }, [])
@@ -814,10 +857,13 @@ export default function Dashboard() {
           </div>
           {events.length > 0 ? (
             <div className="max-h-[480px] overflow-auto">
-              {events.map((event, idx) => {
+              {events.map((event) => {
                 const id = `${event.path}-${event.recorded_at}`
+                // key 里不能带下标：新事件总是插到数组头部，带下标会让「每一行」的
+                // key 都发生变化，React 于是整列表卸载重建（50 行 × 每次事件），
+                // 叠加 slide-down 动画就是肉眼可见的卡顿。id 本身已足够唯一。
                 return (
-                  <EventRow key={`${id}-${idx}`} event={event} isNew={newEventIds.has(id)} />
+                  <EventRow key={id} event={event} isNew={newEventIds.has(id)} />
                 )
               })}
             </div>

@@ -132,6 +132,19 @@ export default function RelationCanvas({
   const edgesRef = useRef<SimEdge[]>([])
   const viewRef = useRef({ scale: 1, ox: 0, oy: 0 })
   const alphaRef = useRef(1)
+  // 渲染循环的唤醒句柄：静止停帧后，由 rebuild / 交互重新驱动
+  const wakeRef = useRef<(() => void) | null>(null)
+  // 单帧重绘：用于平移 / 缩放 / 悬停这类「只改 ref、不触发 React 渲染」的交互，
+  // 循环已停帧时必须显式请求一帧，否则画面不会更新。
+  const requestRepaint = () => {
+    if (wakeRef.current) {
+      wakeRef.current()
+      return
+    }
+    // 循环尚未启动（首次渲染前）
+    requestAnimationFrame(() => drawRef.current?.())
+  }
+  const drawRef = useRef<(() => void) | null>(null)
   const annotationsRef = useRef<Annotation[]>([])
   const hoverRef = useRef<SimNode | null>(null)
   const dragRef = useRef<{
@@ -239,6 +252,7 @@ export default function RelationCanvas({
       nodesRef.current = newNodes
       edgesRef.current = newEdges
       alphaRef.current = Math.max(alphaRef.current, 0.5)
+      wakeRef.current?.()
     },
     [density, t],
   )
@@ -253,7 +267,12 @@ export default function RelationCanvas({
     const nodes = [...nodesRef.current.values()]
     const n = nodes.length
     const alpha = alphaRef.current
-    if (n === 0) return
+    if (n === 0) {
+      // 没有节点时必须让 alpha 归零，否则按需渲染的循环会永远判定"还没收敛"，
+      // 在空画布上以 60fps 空转（可视化页刚打开、尚无事件时就是这个状态）。
+      alphaRef.current = 0
+      return
+    }
     for (let i = 0; i < n; i++) {
       const a = nodes[i]
       for (let j = i + 1; j < n; j++) {
@@ -432,6 +451,7 @@ export default function RelationCanvas({
     const canvas = canvasRef.current
     if (!canvas) return
     ctxRef.current = canvas.getContext('2d')
+    drawRef.current = draw
 
     const ro = new ResizeObserver(() => {
       const el = containerRef.current
@@ -451,17 +471,40 @@ export default function RelationCanvas({
     })
     if (containerRef.current) ro.observe(containerRef.current)
 
+    // 原实现无条件以 60fps 重绘整张画布：即使力导向仿真早已静止（alpha 衰减到 0）、
+    // 用户也没有交互，仍在每帧清屏 + 重画所有节点/连线/标签 —— 只要停留在可视化页，
+    // CPU 就长期被占满，整机（含窗口拖动、切页）都能感到掉帧。
+    // 现在改为按需渲染：仿真未收敛、或存在待处理交互（拖拽/画笔/缩放）时才继续画，
+    // 静止后自动停帧，直到下一次 rebuild / 交互唤醒。
     let raf = 0
+    let running = true
     const loop = () => {
-      if (!pausedRef.current) tick()
-      draw()
+      if (!running) return
+      const needFrame = !pausedRef.current && alphaRef.current > 0.005
+      if (needFrame) {
+        tick()
+        draw()
+        raf = requestAnimationFrame(loop)
+      } else {
+        // 静止：再画一帧收尾，然后停掉循环，避免空转
+        draw()
+        running = false
+      }
+    }
+    const wake = () => {
+      if (running) return
+      running = true
       raf = requestAnimationFrame(loop)
     }
     raf = requestAnimationFrame(loop)
+    // rebuild 会把 alpha 抬回 0.5，这里同步唤醒循环
+    wakeRef.current = wake
 
     return () => {
+      running = false
       cancelAnimationFrame(raf)
       ro.disconnect()
+      wakeRef.current = null
     }
   }, [tick, draw])
 
@@ -513,6 +556,7 @@ export default function RelationCanvas({
     const { sx, sy } = getPos(e)
     if (mode === 'pen' && penRef.current) {
       penRef.current.push(screenToWorld(sx, sy))
+      requestRepaint()
       return
     }
     const drag = dragRef.current
@@ -526,6 +570,7 @@ export default function RelationCanvas({
         node.vy = 0
       }
       if (Math.abs(sx - drag.startX) > 3 || Math.abs(sy - drag.startY) > 3) drag.moved = true
+      requestRepaint()
       return
     }
     if (drag.type === 'pan') {
@@ -535,11 +580,14 @@ export default function RelationCanvas({
         oy: drag.oy + (sy - drag.startY),
       }
       if (Math.abs(sx - drag.startX) > 3 || Math.abs(sy - drag.startY) > 3) drag.moved = true
+      requestRepaint()
       return
     }
     // 悬浮提示
     const hit = hitTest(sx, sy)
+    const hoverChanged = hoverRef.current !== hit
     hoverRef.current = hit
+    if (hoverChanged) requestRepaint()
     if (hit) {
       setHover({
         id: hit.id,
@@ -607,6 +655,7 @@ export default function RelationCanvas({
     const wx = (sx - ox) / scale
     const wy = (sy - oy) / scale
     viewRef.current = { scale: newScale, ox: sx - wx * newScale, oy: sy - wy * newScale }
+    requestRepaint()
   }
 
   const zoomBy = (factor: number) => {
@@ -618,18 +667,21 @@ export default function RelationCanvas({
     const wx = (cx - ox) / scale
     const wy = (cy - oy) / scale
     viewRef.current = { scale: newScale, ox: cx - wx * newScale, oy: cy - wy * newScale }
+    requestRepaint()
   }
 
   const resetView = () => {
     const { w, h } = sizeRef.current
     viewRef.current = { scale: 1, ox: w / 2, oy: h / 2 }
     alphaRef.current = 1
+    requestRepaint()
   }
 
   const togglePause = () => {
     const next = !paused
     pausedRef.current = next
     setPaused(next)
+    if (!next) requestRepaint()
   }
 
   const cycleDensity = () => setDensity((d) => (d + 1) % DENSITY.length)

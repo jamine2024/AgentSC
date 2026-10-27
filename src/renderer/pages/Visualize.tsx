@@ -96,6 +96,8 @@ export default function Visualize({ watcherStatus }: { watcherStatus: WatcherSta
       if (!Array.isArray(batch)) return
       const mapped = (batch as Record<string, unknown>[]).map(norm)
       bufferRef.current.push(...mapped)
+      // 页面长期不可见时缓冲会持续堆积，超限保留最近的即可
+      if (bufferRef.current.length > 4000) bufferRef.current.splice(0, bufferRef.current.length - 4000)
       totalSeenRef.current += mapped.length
       for (const e of mapped) {
         if (e.type === 'created') rateRef.current.created++
@@ -105,7 +107,11 @@ export default function Visualize({ watcherStatus }: { watcherStatus: WatcherSta
     }
     api?.on('file-events-batch', handler)
 
+    // 500ms 一次把 1500 条事件整体重建数组：事件密集时这等于每秒两次复制
+    // 1500 个对象，并连带 topProcesses / netChange / 关系图 rebuild 全部重算。
+    // 页面不可见（切到别的 tab 或窗口隐藏）时完全没必要做，先攒着即可。
     const flush = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       if (bufferRef.current.length) {
         setEvents((prev) => {
           const next = [...bufferRef.current, ...prev].slice(0, 1500)
@@ -122,9 +128,10 @@ export default function Visualize({ watcherStatus }: { watcherStatus: WatcherSta
     }
   }, [api])
 
-  // 每秒采样趋势
+  // 每秒采样趋势（页面不可见时不采样，避免后台空转）
   useEffect(() => {
     const sample = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       const { created, modified, deleted } = rateRef.current
       rateRef.current = { created: 0, modified: 0, deleted: 0 }
       const sum = created + modified + deleted
@@ -155,7 +162,11 @@ export default function Visualize({ watcherStatus }: { watcherStatus: WatcherSta
       }
     }
     poll()
-    const id = setInterval(poll, 4000)
+    // 磁盘占用 4s 轮询同样只在可见时进行
+    const id = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      void poll()
+    }, 4000)
     return () => clearInterval(id)
   }, [api])
 

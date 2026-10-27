@@ -1,44 +1,51 @@
-import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
+import { Component, lazy, Suspense, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { Sparkles } from 'lucide-react'
 import { Sidebar, navItems } from './components/Sidebar'
 import { Header } from './components/Header'
-import Dashboard from './pages/Dashboard'
-import Exclusions from './pages/Exclusions'
-import Analysis from './pages/Analysis'
-import Tracking from './pages/Tracking'
-import Visualize from './pages/Visualize'
-import ReportsInsights from './pages/ReportsInsights'
-import Cleaner from './pages/Cleaner'
-import AiCleanup, { type ScanResult, type RunDetail } from './pages/AiCleanup'
-import Logs from './pages/Logs'
-import SettingsPage from './pages/Settings'
-import Ollama from './pages/Ollama'
-import CliManager from './pages/CliManager'
-import LanShare from './pages/LanShare'
-import StartupManager from './pages/StartupManager'
-import { CliConsoleDrawer } from './components/CliConsoleDrawer'
-import { type CliRunState, stripAnsi, CLI_OUTPUT_CAP } from './lib/cliTypes'
-import DevTools from './pages/DevTools'
-import WslManager from './pages/WslManager'
-import TaskManager from './pages/TaskManager'
-import Uninstaller from './pages/Uninstaller'
-import Hardware from './pages/Hardware'
-import MouseKeyboard from './pages/MouseKeyboard'
-import EventViewer from './pages/EventViewer'
-import WinTaskScheduler from './pages/WinTaskScheduler'
-import MyComputerIcons from './pages/MyComputerIcons'
-import ContextMenu from './pages/ContextMenu'
-import SpeedTest from './pages/SpeedTest'
-import RegistryManager from './pages/RegistryManager'
-import CertManager from './pages/CertManager'
-import NetworkTracer from './pages/NetworkTracer'
-import NetworkSecurity from './pages/NetworkSecurity'
-import PacketCapture from './pages/PacketCapture'
-import TimeSync from './pages/TimeSync'
+import type { ScanResult, RunDetail } from './pages/AiCleanup'
 import ToastContainer, { useToastNotifications } from './components/Toast'
 import Splash from './components/Splash'
 import { GlobalSearch } from './components/GlobalSearch'
+import { CliConsoleDrawer } from './components/CliConsoleDrawer'
+import { type CliRunState, stripAnsi, CLI_OUTPUT_CAP } from './lib/cliTypes'
 import { useI18n } from './lib/i18n'
+
+// ── 路由级代码分割 ──
+// App 原先静态 import 全部 30+ 个页面，recharts 等重型依赖全部打进首屏 bundle：
+// 启动解析慢、渲染进程堆内存高。改为按页 lazy 切分，进入哪个页面才加载哪个
+// chunk。常驻组件（Sidebar / Header / Toast / Splash / GlobalSearch / 抽屉）保留
+// 静态导入。类型导入（import type）不参与打包，仍可静态引用。
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Exclusions = lazy(() => import('./pages/Exclusions'))
+const Analysis = lazy(() => import('./pages/Analysis'))
+const Tracking = lazy(() => import('./pages/Tracking'))
+const Visualize = lazy(() => import('./pages/Visualize'))
+const ReportsInsights = lazy(() => import('./pages/ReportsInsights'))
+const Cleaner = lazy(() => import('./pages/Cleaner'))
+const AiCleanup = lazy(() => import('./pages/AiCleanup'))
+const Logs = lazy(() => import('./pages/Logs'))
+const SettingsPage = lazy(() => import('./pages/Settings'))
+const Ollama = lazy(() => import('./pages/Ollama'))
+const CliManager = lazy(() => import('./pages/CliManager'))
+const LanShare = lazy(() => import('./pages/LanShare'))
+const StartupManager = lazy(() => import('./pages/StartupManager'))
+const DevTools = lazy(() => import('./pages/DevTools'))
+const WslManager = lazy(() => import('./pages/WslManager'))
+const TaskManager = lazy(() => import('./pages/TaskManager'))
+const Uninstaller = lazy(() => import('./pages/Uninstaller'))
+const Hardware = lazy(() => import('./pages/Hardware'))
+const MouseKeyboard = lazy(() => import('./pages/MouseKeyboard'))
+const EventViewer = lazy(() => import('./pages/EventViewer'))
+const WinTaskScheduler = lazy(() => import('./pages/WinTaskScheduler'))
+const MyComputerIcons = lazy(() => import('./pages/MyComputerIcons'))
+const ContextMenu = lazy(() => import('./pages/ContextMenu'))
+const SpeedTest = lazy(() => import('./pages/SpeedTest'))
+const RegistryManager = lazy(() => import('./pages/RegistryManager'))
+const CertManager = lazy(() => import('./pages/CertManager'))
+const NetworkTracer = lazy(() => import('./pages/NetworkTracer'))
+const NetworkSecurity = lazy(() => import('./pages/NetworkSecurity'))
+const PacketCapture = lazy(() => import('./pages/PacketCapture'))
+const TimeSync = lazy(() => import('./pages/TimeSync'))
 
 export interface WatcherStatus {
   active: boolean
@@ -96,8 +103,18 @@ export interface AiInsightsResult {
   error?: string
 }
 
-export class AppErrorBoundary extends Component<{ children: ReactNode }> {
-  state = { error: null as Error | null }
+// 路由 chunk 加载中的占位：居中小图标，避免整页白屏闪烁
+function PageFallback() {
+  return (
+    <div className="flex h-64 w-full items-center justify-center text-muted-foreground">
+      <div className="flex items-center gap-2 text-sm">
+        <Sparkles className="h-4 w-4 animate-pulse" />
+      </div>
+    </div>
+  )
+}
+
+export class AppErrorBoundary extends Component<{ children: ReactNode }> {  state = { error: null as Error | null }
   static getDerivedStateFromError(error: Error) {
     return { error }
   }
@@ -140,7 +157,6 @@ export default function App() {
   const bootStartRef = useRef(Date.now())
   const readyFiredRef = useRef(false)
   const [version, setVersion] = useState('0.1.0')
-  const [heartbeat, setHeartbeat] = useState(0)
   const [watcherStatus, setWatcherStatus] = useState<WatcherStatus>({ active: false, paths: [] })
 
   // 全局扫描状态（跨标签页保持）
@@ -263,21 +279,29 @@ export default function App() {
     }
   }, [])
 
+  // 全局轮询监控状态，确保切换页面时状态不丢失。
+  // 1) 窗口隐藏到托盘 / 最小化时不再轮询（此时没人看得到指示灯，白烧 CPU 和 IPC）；
+  // 2) 返回值与上次相同则跳过 setState，避免每 5 秒整棵页面树重渲染一次。
   useEffect(() => {
-    const t = setInterval(() => setHeartbeat((h) => (h + 1) % 100), 1000)
-    return () => clearInterval(t)
-  }, [])
-
-  // 全局轮询监控状态，确保切换页面时状态不丢失
-  useEffect(() => {
+    let lastJson = ''
     const fetch = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       api?.invoke('get-watcher-status').then((s) => {
-        if (s && typeof s === 'object') setWatcherStatus(s as WatcherStatus)
+        if (!s || typeof s !== 'object') return
+        const json = JSON.stringify(s)
+        if (json === lastJson) return
+        lastJson = json
+        setWatcherStatus(s as WatcherStatus)
       })
     }
+    const onVisible = () => { if (document.visibilityState === 'visible') fetch() }
     fetch()
     const t = setInterval(fetch, 5000)
-    return () => clearInterval(t)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [])
 
   // 全局 CLI 流式监听（在 App 挂载期间常驻，切 tab 不会卸载，故后台进程持续可见）
@@ -589,13 +613,14 @@ export default function App() {
       <main className="flex flex-1 flex-col overflow-hidden">
         <Header
           activeTab={activeTab}
-          heartbeat={heartbeat}
           watcherStatus={watcherStatus}
           cliRunningCount={cliRuns.filter((r) => r.running).length}
           onOpenCliConsole={() => setCliConsoleOpen(true)}
           onOpenSearch={() => setSearchOpen(true)}
         />
-        <div className="flex-1 overflow-auto p-8">{renderContent()}</div>
+        <div className="flex-1 overflow-auto p-8">
+          <Suspense fallback={<PageFallback />}>{renderContent()}</Suspense>
+        </div>
       </main>
 
       <ToastContainer toasts={toasts} dismissToast={dismissToast} />

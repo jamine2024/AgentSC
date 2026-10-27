@@ -79,10 +79,17 @@ import {
   getCertSupport,
 } from './cert'
 import { buildScanReportTxt, type ScanReportPayload } from './scanReport'
-import { startWatching, stopWatching, setMainWindow, getWatcherStatus } from './watcher'
+import {
+  startWatching,
+  stopWatching,
+  setMainWindow,
+  getWatcherStatus,
+  invalidateLargeFileThresholdCache,
+} from './watcher'
 import { getProcessTrackerStatus, startProcessTracking, stopProcessTracking } from './processTracker'
 import {
   startNetworkTracer,
+  touchNetworkTracer,
   stopNetworkTracer,
   getNetConnections,
   getNetEvents,
@@ -528,11 +535,28 @@ function createWindow() {
     }
   })
 
-  // 捕获渲染进程控制台错误，写入 DB 日志
+  // 捕获渲染进程控制台错误，写入 DB 日志。
+  // 必须限流：React 警告这类消息在高频重渲染时可能每秒刷出上百条，而 logToDb 是
+  // 同步 SQLite 写入 —— 「卡顿 → 报警告 → 同步写库 → 更卡」的自我放大回路。
+  // 这里按内容去重 + 全局每分钟上限，只保留信息量最高的那些。
+  let consoleLogBudget = 60
+  let consoleLogWindowStart = Date.now()
+  const consoleLogSeen = new Map<string, number>()
   mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
-    if (level >= 2) {
-      logToDb(level >= 3 ? 'error' : 'warn', 'renderer', `${message}`, `${sourceId}:${line}`)
+    if (level < 2) return
+    const now = Date.now()
+    if (now - consoleLogWindowStart > 60_000) {
+      consoleLogWindowStart = now
+      consoleLogBudget = 60
+      consoleLogSeen.clear()
     }
+    if (consoleLogBudget <= 0) return
+    const key = `${message}`
+    const last = consoleLogSeen.get(key)
+    if (last && now - last < 30_000) return
+    consoleLogSeen.set(key, now)
+    consoleLogBudget -= 1
+    logToDb(level >= 3 ? 'error' : 'warn', 'renderer', `${message}`, `${sourceId}:${line}`)
   })
 
   // 捕获渲染进程未捕获异常
@@ -664,7 +688,7 @@ app.whenReady().then(() => {
     .then(() => ensureInitialAiInsights())
     .then(() => applyAiInsightsSchedule())
     .then(() => reloadAllScheduledTasks())
-    .then(() => fileSearchIndexer.init())
+    .then(() => { if (process.env.AGENTSC_NO_INDEX !== '1') fileSearchIndexer.init() })
     .catch((err) => logToDb('error', 'startup', '启动后初始化失败', String(err)))
 
     // T0（watcher 启动）
@@ -695,26 +719,14 @@ app.whenReady().then(() => {
         setTimeout(launchBgTasks, 6_000)
         // 15s：脱离首屏后再开 processTracker（PowerShell fork）
         setTimeout(launchProcessTracker, 15_000)
-        // 9s：网络追踪（PowerShell 拉取连接表，开销轻）持续采集动作路径
-        setTimeout(() => {
-          try {
-            startNetworkTracer(4000)
-          } catch (err) {
-            logToDb('error', 'startup', '网络追踪启动失败', String(err))
-          }
-        }, 9_000)
       })
     } else {
       setTimeout(launchBgTasks, 6_000)
       setTimeout(launchProcessTracker, 15_000)
-      setTimeout(() => {
-        try {
-          startNetworkTracer(4000)
-        } catch (err) {
-          logToDb('error', 'startup', '网络追踪启动失败', String(err))
-        }
-      }, 9_000)
     }
+    // 网络追踪不再在启动时无条件常驻：它每轮都要 fork PowerShell 抓全量连接表，
+    // 而数据只有「网络追踪」页面才会看。改为由 network:* IPC 惰性拉起，页面离开
+    // 90s 后自动停采（见 networkTracer.touchNetworkTracer）。
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -733,20 +745,45 @@ interface CacheEntry<T> { at: number; result: T }
 const localDrivesCache = new Map<symbol, CacheEntry<string[]>>()
 const diskInfoCache = new Map<symbol, CacheEntry<{ letter: string; label: string; total: number; used: number }[]>>()
 
-function withCache<T>(store: Map<symbol, CacheEntry<T>>, key: symbol, loader: () => Promise<T>): Promise<T> {
+// 缓存键必须是模块级常量。原实现在每次调用时 `Symbol('disk-info')` 新建一个键，
+// Map 里永远查不到上一次写入的条目 —— 缓存形同虚设，于是 Dashboard / Visualize
+// 的磁盘轮询（每 2~4s）每次都真的 fork 一个 powershell.exe（200~800ms 阻塞），
+// 主线程被反复抢占，表现为界面规律性卡顿。
+const DRIVES_CACHE_KEY = Symbol('local-drives')
+const DISK_INFO_CACHE_KEY = Symbol('disk-info')
+
+// 并发去重：同一 key 的在途请求只发起一次，避免 Dashboard 与 Visualize 同时轮询时
+// 各自 fork 一个 PowerShell。磁盘信息还要单独设置较短的 TTL（磁盘余量会变化）。
+const inflightCache = new Map<symbol, Promise<unknown>>()
+
+function withCache<T>(
+  store: Map<symbol, CacheEntry<T>>,
+  key: symbol,
+  loader: () => Promise<T>,
+  ttlMs: number = PS_CACHE_TTL_MS,
+): Promise<T> {
   const now = Date.now()
   const cached = store.get(key)
-  if (cached && now - cached.at < PS_CACHE_TTL_MS) {
+  if (cached && now - cached.at < ttlMs) {
     return Promise.resolve(cached.result)
   }
-  return loader().then((result) => {
-    store.set(key, { at: now, result })
-    return result
-  })
+  const inflight = inflightCache.get(key) as Promise<T> | undefined
+  if (inflight) return inflight
+  const task = loader()
+    .then((result) => {
+      store.set(key, { at: Date.now(), result })
+      return result
+    })
+    .finally(() => {
+      inflightCache.delete(key)
+    })
+  inflightCache.set(key, task as Promise<unknown>)
+  return task
 }
 
 function getLocalDrives(): Promise<string[]> {
-  const key = Symbol('local-drives')
+  const key = DRIVES_CACHE_KEY
+  // 盘符列表变化极少（插拔盘才会变），TTL 从 5 分钟放宽到 30 分钟
   return withCache(localDrivesCache, key, () => new Promise<string[]>((resolve) => {
     const ps = `
       [Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
@@ -765,7 +802,40 @@ function getLocalDrives(): Promise<string[]> {
         .map((letter) => `${letter}\\`)
       resolve(lines.length > 0 ? lines : ['C:\\'])
     })
-  }))
+  }), 30 * 60 * 1000)
+}
+
+// 卷标同样来自 WMI，但变化极少 —— 30 分钟缓存；失败也缓存（避免 WMI 异常的
+// 机器每 30s 磁盘轮询都重试 fork 一次）。
+const DRIVE_LABEL_TTL_MS = 30 * 60 * 1000
+let driveLabelCache: { at: number; map: Map<string, string> } | null = null
+
+async function getDriveLabels(): Promise<Map<string, string>> {
+  if (driveLabelCache && Date.now() - driveLabelCache.at < DRIVE_LABEL_TTL_MS) {
+    return driveLabelCache.map
+  }
+  const map = new Map<string, string>()
+  try {
+    const stdout = await new Promise<string>((resolve, reject) => {
+      execFile(
+        'powershell',
+        ['-NoProfile', '-Command', '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-CimInstance -ClassName Win32_LogicalDisk | Where-Object { $_.DriveType -eq 3 } | ForEach-Object { "$($_.DeviceID)|$($_.VolumeName)" }'],
+        { encoding: 'utf-8', timeout: 20000 },
+        (err, out) => (err ? reject(err) : resolve(out)),
+      )
+    })
+    for (const line of stdout.split(/\r?\n/)) {
+      const idx = line.indexOf('|')
+      if (idx < 2) continue
+      const letter = line.slice(0, idx).trim().toUpperCase()
+      const label = line.slice(idx + 1).trim()
+      if (/^[A-Z]:$/.test(letter)) map.set(`${letter}\\`, label)
+    }
+  } catch {
+    /* WMI 不可用时保留空 map，卷标显示「本地磁盘」 */
+  }
+  driveLabelCache = { at: Date.now(), map }
+  return map
 }
 
 function getSetting<T>(key: string, fallback: T): T {
@@ -821,9 +891,11 @@ ipcMain.handle('select-directory', async () => {
 
 ipcMain.handle('get-drives', () => getLocalDrives())
 
-ipcMain.handle('get-disk-info', async () => {
-  const key = Symbol('disk-info')
-  return withCache(diskInfoCache, key, () => new Promise<{ letter: string; label: string; total: number; used: number }[]>((resolve) => {
+// 磁盘容量/余量改用 fs.statfs 原生读取（Node 20 在 Windows 上支持），
+// 磁盘轮询从「每 30s fork 一个 powershell.exe」变成零进程开销。
+// statfs 不可用 / 全部失败时回退旧的 PowerShell 路径。
+async function getDiskInfoViaPowerShell(): Promise<{ letter: string; label: string; total: number; used: number }[]> {
+  return new Promise((resolve) => {
     const ps = `
       [Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
       Get-CimInstance -ClassName Win32_LogicalDisk | Where-Object { $_.DriveType -eq 3 } |
@@ -854,7 +926,35 @@ ipcMain.handle('get-disk-info', async () => {
         resolve([])
       }
     })
-  }))
+  })
+}
+
+ipcMain.handle('get-disk-info', async () => {
+  const key = DISK_INFO_CACHE_KEY
+  // 磁盘余量会随使用变化，取 30s 短 TTL
+  return withCache(diskInfoCache, key, async () => {
+    try {
+      const drives = await getLocalDrives()
+      const labels = await getDriveLabels()
+      const stats = await Promise.all(
+        drives.map(async (letter) => {
+          try {
+            const st = await fs.promises.statfs(letter)
+            const total = st.blocks * st.bsize
+            const free = st.bfree * st.bsize
+            return { letter, label: labels.get(letter) || '本地磁盘', total, used: Math.max(0, total - free) }
+          } catch {
+            return null
+          }
+        }),
+      )
+      const ok = stats.filter((s): s is { letter: string; label: string; total: number; used: number } => s !== null)
+      if (ok.length > 0) return ok
+    } catch {
+      /* fallthrough */
+    }
+    return getDiskInfoViaPowerShell()
+  }, 30_000)
 })
 
 ipcMain.handle('get-recent-events', async (_event, limit = 50) => {
@@ -984,9 +1084,20 @@ ipcMain.handle('get-watcher-status', () => getWatcherStatus())
 ipcMain.handle('get-process-tracker-status', () => getProcessTrackerStatus())
 
 // ── IP 追踪 / 网络动作路径 ──
-ipcMain.handle('network:status', () => getNetStatus())
-ipcMain.handle('network:connections', () => getNetConnections())
-ipcMain.handle('network:events', (_event, limit = 200) => getNetEvents(limit))
+// 「网络追踪」页每次轮询都会问这三条，正好作为消费者心跳：首次访问惰性启动采样，
+// 页面关掉后 90s 自动停采（见 networkTracer 的 IDLE_STOP_MS）。
+ipcMain.handle('network:status', () => {
+  touchNetworkTracer()
+  return getNetStatus()
+})
+ipcMain.handle('network:connections', () => {
+  touchNetworkTracer()
+  return getNetConnections()
+})
+ipcMain.handle('network:events', (_event, limit = 200) => {
+  touchNetworkTracer()
+  return getNetEvents(limit)
+})
 ipcMain.handle('network:start', (_event, interval?: number) => {
   startNetworkTracer(typeof interval === 'number' ? interval : undefined)
   return getNetStatus()
@@ -1280,6 +1391,8 @@ ipcMain.handle('get-large-file-threshold', () => getLargeFileThreshold())
 
 ipcMain.handle('set-large-file-threshold', async (_event, mb: number) => {
   setSetting('large_file_threshold_mb', mb)
+  // watcher 侧对大文件阈值做了缓存，改完必须显式失效，否则要等 TTL 才生效
+  invalidateLargeFileThresholdCache()
 })
 
 // ======== 发送通知（供渲染进程调用） ========

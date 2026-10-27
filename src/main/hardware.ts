@@ -3,6 +3,7 @@
 // （CPU 占用率、内存占用、温度）。温度依赖 root/WMI MSAcpi_ThermalZoneTemperature，
 // 很多消费级设备不暴露该数据，因此采用"尽力而为 + 优雅降级"策略。
 import fs from 'node:fs'
+import os from 'node:os'
 import { execFile } from 'node:child_process'
 
 // ───────────────────────────── 类型 ─────────────────────────────
@@ -299,6 +300,17 @@ if ($out.Count -eq 0) { '[]' } else { $out | ConvertTo-Json -Compress }
 
 // ───────────────────────────── 实现 ─────────────────────────────
 
+// 温度解析抽成公共函数（getHardwareInfo 与 getLiveMetrics 各有一份重复逻辑）
+function parseTempSensors(raw: string): TempSensor[] {
+  return parseJsonArray<any>(raw)
+    .map((t) => ({
+      name: str(t.name),
+      celsius: num(t.celsius),
+      source: (['thermal', 'disk', 'probe', 'gpu'].includes(t.source) ? t.source : 'thermal') as TempSource,
+    }))
+    .filter((t) => Number.isFinite(t.celsius) && t.celsius >= -20 && t.celsius <= 150)
+}
+
 export async function getHardwareInfo(): Promise<HardwareInfo> {
   const [cpuRaw, gpuRaw, memRaw, netRaw, dnsRaw, sysRaw, tempRaw, camRaw, audioRaw, dispRaw] = await Promise.all([
     runPowerShell(CPU_SCRIPT).catch(() => ''),
@@ -417,13 +429,7 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
     },
   }
 
-  const temps = parseJsonArray<any>(tempRaw)
-    .map((t) => ({
-      name: str(t.name),
-      celsius: num(t.celsius),
-      source: (['thermal', 'disk', 'probe', 'gpu'].includes(t.source) ? t.source : 'thermal') as TempSource,
-    }))
-    .filter((t) => Number.isFinite(t.celsius) && t.celsius >= -20 && t.celsius <= 150)
+  const temps = parseTempSensors(tempRaw)
   const tempsSupported = temps.length > 0
 
   const camRows = parseJsonArray<any>(camRaw)
@@ -463,56 +469,94 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
   return { cpu, gpu, memory, memoryTotal, network, system, camera, audio, display, temps, tempsSupported }
 }
 
-// 温度实时采样缓存（避免每次轮询都 fork powershell）
+// ── 实时指标：CPU / 内存改用 Node 原生采样，不再 fork PowerShell ──
+// 旧实现每 2s fork 一次 powershell.exe 跑 Get-CimInstance（单次 200~800ms CPU、
+// 瞬时上百 MB 内存，任务管理器 / 硬件页轮询期间进程创建从不停）。os.cpus() 的
+// 计数器是自开机起的累计值，相邻两次调用求 delta 即得平均占用率，零进程开销。
+let prevCpu: { at: number; idle: number; total: number } | null = null
+
+function sampleCpuTimes(): { idle: number; total: number } {
+  let idle = 0
+  let total = 0
+  for (const c of os.cpus()) {
+    idle += c.times.idle
+    total += c.times.idle + c.times.user + c.times.nice + c.times.sys + c.times.irq
+  }
+  return { idle, total }
+}
+
+function cpuPctFromDelta(prevIdle: number, prevTotal: number, curIdle: number, curTotal: number): number {
+  const dTotal = curTotal - prevTotal
+  const dIdle = curIdle - prevIdle
+  if (dTotal <= 0) return 0
+  const pct = (1 - dIdle / dTotal) * 100
+  return Math.min(100, Math.max(0, Math.round(pct * 10) / 10))
+}
+
+async function sampleCpuPct(): Promise<number> {
+  const now = Date.now()
+  // 上一次采样距今足够久（≥800ms）→ 直接用累计计数器求 delta，立即返回
+  if (prevCpu && now - prevCpu.at >= 800) {
+    const cur = sampleCpuTimes()
+    const pct = cpuPctFromDelta(prevCpu.idle, prevCpu.total, cur.idle, cur.total)
+    prevCpu = { at: now, idle: cur.idle, total: cur.total }
+    return pct
+  }
+  // 首次调用 / 调用间隔太近（多个页面同时轮询）：内部做一次 250ms 双采样补齐
+  const a = sampleCpuTimes()
+  await new Promise((r) => setTimeout(r, 250))
+  const b = sampleCpuTimes()
+  prevCpu = { at: Date.now(), idle: b.idle, total: b.total }
+  return cpuPctFromDelta(a.idle, a.total, b.idle, b.total)
+}
+
+// 温度仍需 WMI / nvidia-smi（Node 拿不到），保留 PowerShell 但大幅降频：
+// 能采到时 30s 一次；从未采到温度的机器 10 分钟才重试一次，不再每轮空烧 fork。
 let tempCache: { at: number; temps: TempSensor[]; supported: boolean } | null = null
-const TEMP_CACHE_TTL = 5000
+const TEMP_CACHE_TTL = 30_000
+const TEMP_UNSUPPORTED_RETRY_MS = 10 * 60_000
 
 let liveCache: { at: number; data: LiveMetric } | null = null
-const LIVE_CACHE_TTL = 2000
+const LIVE_CACHE_TTL = 1000
 
 export async function getLiveMetrics(): Promise<LiveMetric> {
   const now = Date.now()
   if (liveCache && now - liveCache.at < LIVE_CACHE_TTL) return liveCache.data
 
-  const [cpuRaw, memRaw, tempRaw] = await Promise.all([
-    runPowerShell(
-      `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; (Get-CimInstance -ClassName Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average`,
-    ).catch(() => ''),
-    runPowerShell(
-      `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-CimInstance -ClassName Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory | ConvertTo-Json -Compress`,
-    ).catch(() => ''),
-    runPowerShell(TEMP_SCRIPT).catch(() => '[]'),
+  const [cpu, tempResult] = await Promise.all([
+    sampleCpuPct(),
+    (async () => {
+      if (tempCache) {
+        const ttl = tempCache.supported ? TEMP_CACHE_TTL : TEMP_UNSUPPORTED_RETRY_MS
+        if (now - tempCache.at < ttl) return tempCache
+      }
+      try {
+        const raw = await runPowerShell(TEMP_SCRIPT).catch(() => '[]')
+        const temps = parseTempSensors(raw)
+        const supported = temps.length > 0
+        tempCache = { at: Date.now(), temps, supported }
+      } catch {
+        /* 保留上次结果或空 */
+      }
+      return tempCache ?? { at: now, temps: [] as TempSensor[], supported: false }
+    })(),
   ])
 
-  const cpu = (() => {
-    const v = parseFloat((cpuRaw || '').trim())
-    return Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0
-  })()
-
-  const mem = parseJsonArray<any>(memRaw)[0] || {}
-  const memTotal = num(mem.TotalVisibleMemorySize) * 1024
-  const memFree = num(mem.FreePhysicalMemory) * 1024
+  // os.freemem() 即 GlobalMemoryStatusEx 的可用物理内存（与任务管理器口径一致）
+  const memTotal = os.totalmem()
+  const memFree = os.freemem()
   const memUsed = Math.max(0, memTotal - memFree)
   const memPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0
 
-  let temps: TempSensor[] = []
-  let tempsSupported = false
-  if (tempCache && now - tempCache.at < TEMP_CACHE_TTL) {
-    temps = tempCache.temps
-    tempsSupported = tempCache.supported
-  } else {
-    temps = parseJsonArray<any>(tempRaw)
-      .map((t) => ({
-        name: str(t.name),
-        celsius: num(t.celsius),
-        source: (['thermal', 'disk', 'probe', 'gpu'].includes(t.source) ? t.source : 'thermal') as TempSource,
-      }))
-      .filter((t) => Number.isFinite(t.celsius) && t.celsius >= -20 && t.celsius <= 150)
-    tempsSupported = temps.length > 0
-    tempCache = { at: now, temps, supported: tempsSupported }
+  const result: LiveMetric = {
+    cpu,
+    memUsed,
+    memTotal,
+    memPct,
+    temps: tempResult.temps,
+    tempsSupported: tempResult.supported,
+    timestamp: now,
   }
-
-  const result: LiveMetric = { cpu, memUsed, memTotal, memPct, temps, tempsSupported, timestamp: now }
   liveCache = { at: now, data: result }
   return result
 }

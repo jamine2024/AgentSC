@@ -2,6 +2,7 @@
 // 与内存占用），结束进程，以及本地启发式"AI 分析"（资源占用、未知发布者、
 // 多实例、无响应等）。AI 分析遵循本项目约定：Ollama 不可用时的本地启发式兜底。
 import { execFile } from 'node:child_process'
+import os from 'node:os'
 
 export interface ProcessInfo {
   id: number
@@ -69,7 +70,33 @@ function parseJsonArray<T>(s: string): T[] {
   }
 }
 
+// 单次采样脚本：不含 Start-Sleep、不再二次枚举、不再查 WMI 取核数。
+// CPU 占用率改在 Node 侧用「相邻两次刷新的 CPU 累计时间差」计算（见 applyCpuPct）。
+// 旧脚本每轮要 1s Sleep + 3 次全量枚举，运行时间 2s+；现在 <1s 即返回。
 const LIST_SCRIPT = `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
+Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -gt 0 -and $_.Name -ne 'Idle' } | ForEach-Object {
+  [PSCustomObject]@{
+    id = [int]$_.Id;
+    name = $_.Name;
+    cpuTime = [math]::Round([double]$_.CPU, 1);
+    memory = [int64]$_.WorkingSet;
+    company = $_.Company;
+    description = $_.Description;
+    title = $_.MainWindowTitle;
+    responding = [bool]$_.Responding;
+    session = [int]$_.SessionId;
+    path = $_.Path;
+    handles = [int]$_.HandleCount;
+    threads = $_.Threads.Count;
+    startTime = if ($_.StartTime) { $_.StartTime.ToString('o') } else { $null }
+  }
+} | ConvertTo-Json -Compress;
+`
+
+// 首次加载（无 CPU 基线）时才用带 1s Sleep 的双采样脚本，让页面打开立刻有
+// 占用率数据；后续刷新全部走单次采样 + Node 侧 delta，成本大幅下降。
+const LIST_SCRIPT_DOUBLE_SAMPLE = `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
 $first = @{};
 foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) { $first[$p.Id] = $p.CPU };
@@ -96,17 +123,11 @@ foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
     session = [int]$p.SessionId;
     path = $p.Path;
     handles = [int]$p.HandleCount;
-    threads = [int]$p.Threads.Count;
+    threads = $p.Threads.Count;
     startTime = if ($p.StartTime) { $p.StartTime.ToString('o') } else { $null }
   };
 };
 $result | ConvertTo-Json -Compress;
-`
-
-const KILL_SCRIPT = `
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
-Stop-Process -Id {PID} -Force -ErrorAction Stop;
-"OK"
 `
 
 // ── 进程列表缓存：避免 TaskManager 页每次刷新都在主进程 fork 一个
@@ -139,11 +160,40 @@ function parseRow(r: any): ProcessInfo {
   }
 }
 
+const LOGICAL_CORES = os.cpus().length || 1
+// CPU 占用率基线：pid -> 上次刷新时的 CPU 累计时间（秒）
+let prevCpuTimes = new Map<number, number>()
+let lastRefreshAt = 0
+
+// 用相邻两次刷新的 CPU 累计时间差计算占用率（与任务管理器同口径：
+// delta / 经过秒数 / 逻辑核数 × 100）。
+function applyCpuPct(rows: ProcessInfo[]): void {
+  const now = Date.now()
+  const elapsed = lastRefreshAt ? (now - lastRefreshAt) / 1000 : 0
+  const next = new Map<number, number>()
+  for (const p of rows) {
+    next.set(p.id, p.cpuTime)
+    const prev = prevCpuTimes.get(p.id)
+    if (prev === undefined || elapsed < 1) {
+      p.cpu = 0
+      continue
+    }
+    const dCpu = p.cpuTime - prev
+    p.cpu = dCpu > 0 ? Math.min(100, Math.round(((dCpu / elapsed) / LOGICAL_CORES) * 1000) / 10) : 0
+  }
+  prevCpuTimes = next
+  lastRefreshAt = now
+}
+
 async function refreshProcs(): Promise<void> {
   try {
-    const raw = await runPowerShell(LIST_SCRIPT)
-    const rows = parseJsonArray<any>(raw)
-    procCache = rows.map(parseRow).filter((p) => p.id > 0)
+    // 首次加载没有 CPU 基线，用旧的双采样脚本让首屏立即有占用率；
+    // 之后全部走单次采样脚本（无 Sleep、无 WMI），delta 在 Node 侧算。
+    const script = prevCpuTimes.size === 0 ? LIST_SCRIPT_DOUBLE_SAMPLE : LIST_SCRIPT
+    const raw = await runPowerShell(script)
+    const rows = parseJsonArray<any>(raw).map(parseRow).filter((p) => p.id > 0)
+    applyCpuPct(rows)
+    procCache = rows
     procCacheReady = true
   } catch {
     /* 刷新失败保留上次缓存，不覆盖 */
@@ -177,8 +227,13 @@ export async function listProcesses(): Promise<ProcessInfo[]> {
 }
 
 export async function killProcess(pid: number): Promise<{ ok: boolean; error?: string }> {
+  // taskkill 是原生小工具（毫秒级启动），比 fork PowerShell 跑 Stop-Process 轻得多
   try {
-    await runPowerShell(KILL_SCRIPT.replace('{PID}', String(pid)), 15000)
+    await new Promise<void>((resolve, reject) => {
+      execFile('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true, timeout: 10000 }, (err) =>
+        err ? reject(err) : resolve(),
+      )
+    })
     return { ok: true }
   } catch (err) {
     return { ok: false, error: String(err) }

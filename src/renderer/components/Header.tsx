@@ -7,14 +7,16 @@ import { useI18n } from '@/lib/i18n'
 
 interface HeaderProps {
   activeTab: string
-  heartbeat: number
   watcherStatus: WatcherStatus
   cliRunningCount?: number
   onOpenCliConsole?: () => void
   onOpenSearch?: () => void
 }
 
-export function Header({ activeTab, heartbeat, watcherStatus, cliRunningCount = 0, onOpenCliConsole, onOpenSearch }: HeaderProps) {
+// heartbeat 原先是一个每秒自增的 state，仅用于让心跳图标隔秒闪烁；这会让 App 每秒
+// 重渲染整棵页面树（Dashboard 的图表/事件列表一并被调和），是本应用最稳定的一处
+// 周期性卡顿源。改用纯 CSS 的 pulse 动画后不再需要任何定时器与重渲染。
+export function Header({ activeTab, watcherStatus, cliRunningCount = 0, onOpenCliConsole, onOpenSearch }: HeaderProps) {
   const { t } = useI18n()
   const labelKey = navItems.find((n) => n.id === activeTab)?.labelKey
   const label = labelKey ? t(labelKey) : ''
@@ -80,7 +82,7 @@ export function Header({ activeTab, heartbeat, watcherStatus, cliRunningCount = 
         )}>
           <HeartPulse className={cn(
             'h-3.5 w-3.5',
-            watcherStatus.active && heartbeat % 2 === 0 && 'animate-pulse'
+            watcherStatus.active && 'animate-pulse'
           )} />
           <span>
             {watcherStatus.active ? t('header.monitoring') : t('header.stopped')}
@@ -112,7 +114,7 @@ export function Header({ activeTab, heartbeat, watcherStatus, cliRunningCount = 
             )}
             title={t('cli.close_console_hint')}
           >
-            <TerminalSquare className={cn('h-3.5 w-3.5', heartbeat % 2 === 0 && 'animate-pulse')} />
+            <TerminalSquare className="h-3.5 w-3.5 animate-pulse" />
             <span>
               {cliRunningCount} {t('cli.tasks_indicator')}
             </span>

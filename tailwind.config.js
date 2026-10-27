@@ -86,9 +86,11 @@ export default {
           '0%': { boxShadow: 'inset 0 0 40px 0 hsl(var(--primary) / 0.25)' },
           '100%': { boxShadow: 'inset 0 0 0px 0 hsl(var(--primary) / 0)' },
         },
+        // 只做 transform/opacity：原来的 maxHeight 0 → 60px 会在整段动画期间
+        // 逐帧触发布局重排（list 里 50 行 × 每帧 reflow），是事件流卡顿的放大器。
         'slide-down': {
-          from: { opacity: '0', transform: 'translateY(-16px) scale(0.97)', maxHeight: '0' },
-          to: { opacity: '1', transform: 'translateY(0) scale(1)', maxHeight: '60px' },
+          from: { opacity: '0', transform: 'translateY(-12px)' },
+          to: { opacity: '1', transform: 'translateY(0)' },
         },
         'number-pop': {
           '0%': { transform: 'translateY(8px)', opacity: '0' },
@@ -109,7 +111,7 @@ export default {
         'accordion-down': 'accordion-down 0.2s ease-out',
         'accordion-up': 'accordion-up 0.2s ease-out',
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-        'fade-in': 'fade-in 0.5s ease-out forwards',
+        'fade-in': 'fade-in 0.3s ease-out forwards',
         'scale-in': 'scale-in 0.2s ease-out forwards',
         'live-dot': 'live-dot 2s ease-out infinite',
         'glow-flash': 'glow-flash 1.2s ease-out forwards',

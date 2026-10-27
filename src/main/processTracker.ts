@@ -1,6 +1,6 @@
-import { spawn, execSync } from 'node:child_process'
+import { spawn, execSync, execFile } from 'node:child_process'
 import path from 'node:path'
-import { logToDb } from './db'
+import { db, logToDb } from './db'
 
 export interface ProcessEvent {
   pid: number
@@ -16,12 +16,16 @@ export interface ProcessTrackerStatus {
   lastError?: string
 }
 
-const MAX_AGE_MS = 8000       // 事件存活时间从 12s → 8s
+// 事件存活窗口 12s：需略大于采样间隔（10s），否则两轮采样之间有归因盲区。
+// 旧方案 30s 采样 + 8s 窗口有 22s 盲区，但那是 fork PowerShell 时代的妥协；
+// tasklist 采样足够便宜，可以同时兼顾频率与连续性。
+const MAX_AGE_MS = 12000
 const MAX_EVENTS = 5000       // 最大存储从 15000 → 5000
 const CLEANUP_INTERVAL_MS = 5000   // 清理间隔从 3s → 5s
-// 快照轮询间隔：从 5s → 30s。每 5s fork 一次 powershell.exe 跑 Get-Process 全列（含 path）
-// 在主进程事件循环上是有显著代价的——30s 已经足够把事件溯源精度做在「秒级」以内。
-const SNAPSHOT_INTERVAL_MS = 30_000
+// 轻采样间隔：tasklist 是原生小工具（毫秒级启动、无 .NET 运行时），10s 一次的
+// 成本远低于旧方案（常驻 PowerShell 每 30s 跑一次 Get-Process 全列，光子进程
+// 本身就常驻 100~200MB）。采样更密，事件溯源的时效窗口反而更好。
+const SNAPSHOT_INTERVAL_MS = 10_000
 
 const eventStore = new Map<string, ProcessEvent>()
 const pathIndex = new Map<string, ProcessEvent>()
@@ -30,45 +34,135 @@ const sortedEvents: ProcessEvent[] = []
 let sortedEventsDirty = false
 
 let etwProcess: ReturnType<typeof spawn> | null = null
-let snapshotProcess: ReturnType<typeof spawn> | null = null
+let snapshotTimer: NodeJS.Timeout | null = null
 let mode: ProcessTrackerStatus['mode'] = 'idle'
 let eventCount = 0
 let lastError = ''
 let cleanupTimer: NodeJS.Timeout | null = null
 
+// ── tasklist 输出解析 ──
+// /FO CSV /NH 输出形如："chrome.exe","1234","Console","1","123,456 K"
+// 用一个小状态机解析引号字段，进程名里带逗号也不会切错列。
+function parseTasklistCsv(stdout: string): Array<{ pid: number; name: string }> {
+  const out: Array<{ pid: number; name: string }> = []
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const fields: string[] = []
+    let cur = ''
+    let inQuote = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (inQuote) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i++ } else inQuote = false
+        } else cur += ch
+      } else if (ch === '"') {
+        inQuote = true
+      } else if (ch === ',') {
+        fields.push(cur)
+        cur = ''
+      } else cur += ch
+    }
+    fields.push(cur)
+    if (fields.length < 2) continue
+    const pid = Number.parseInt(fields[1], 10)
+    if (!Number.isFinite(pid) || pid <= 0) continue
+    out.push({ pid, name: fields[0] })
+  }
+  return out
+}
+
+function runTasklist(): Promise<Array<{ pid: number; name: string }>> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'tasklist',
+      ['/FO', 'CSV', '/NH'],
+      { windowsHide: true, timeout: 8000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf-8' },
+      (err, stdout) => (err ? reject(err) : resolve(parseTasklistCsv(String(stdout || '')))),
+    )
+  })
+}
+
 function normalizePath(p: string) {
   return path.normalize(p).toLowerCase()
 }
 
-// 进程名解析结果缓存：resolveProcessName 走同步 execSync 启动 PowerShell，
-// 单次约 300~500ms 且会阻塞主进程事件循环；监控开启、高频文件事件反复缺失进程名时，
-// 若每次都调用将拖慢所有 IPC（含对话框）。同一 pid 短时间内命中缓存即可跳过同步调用。
-//（默认监控关闭，此兜底路径极少触发，但加上缓存可彻底消除极端情况下的主线程阻塞。）
+// 进程名解析结果缓存：这里**不能用 execSync**，也不能逐 pid fork powershell。
+// 旧实现缓存未命中时每个未知 pid 都同步/异步 fork 一次 powershell.exe（单次
+// 300~500ms），进程风暴下主线程和子进程创建同时被打爆。现在改为：
+//   1) 命中缓存直接返回；
+//   2) 未命中先把 pid 攒进待查集合，去抖 400ms 后跑一次 tasklist 全量快照
+//      （原生小工具，几十毫秒），一次性解析所有 pid 并回填缓存与已有事件。
 const processNameCache = new Map<number, { name: string; ts: number }>()
 const PROCESS_NAME_TTL = 5 * 60 * 1000
+const pendingNameLookups = new Set<number>()
+const MAX_PENDING_LOOKUPS = 128
+let nameFlushTimer: NodeJS.Timeout | null = null
+let nameFlushInFlight = false
+
+function backfillProcessName(pid: number, name: string): void {
+  if (!name) return
+  for (const evt of eventStore.values()) {
+    if (evt.pid === pid && !evt.processName) evt.processName = name
+  }
+  for (const [p, evt] of pathIndex) {
+    if (evt.pid === pid && !evt.processName) {
+      evt.processName = name
+      pathIndex.set(p, evt)
+    }
+  }
+}
+
+function flushProcessNameLookups(): void {
+  nameFlushTimer = null
+  if (nameFlushInFlight || pendingNameLookups.size === 0) return
+  nameFlushInFlight = true
+  const wanted = new Set(pendingNameLookups)
+  pendingNameLookups.clear()
+  runTasklist()
+    .then((rows) => {
+      const byPid = new Map(rows.map((r) => [r.pid, r.name]))
+      const now = Date.now()
+      for (const pid of wanted) {
+        const name = byPid.get(pid) ?? ''
+        processNameCache.set(pid, { name, ts: now })
+        backfillProcessName(pid, name)
+      }
+    })
+    .catch(() => {
+      // tasklist 失败：给这些 pid 记一个空名短缓存，避免无限重试风暴
+      const now = Date.now()
+      for (const pid of wanted) processNameCache.set(pid, { name: '', ts: now - PROCESS_NAME_TTL / 2 })
+    })
+    .finally(() => {
+      nameFlushInFlight = false
+      if (processNameCache.size > 2000) {
+        const keep = [...processNameCache.entries()].slice(-1000)
+        processNameCache.clear()
+        for (const [k, v] of keep) processNameCache.set(k, v)
+      }
+      // 期间又有新 pid 进来 → 继续下一轮
+      if (pendingNameLookups.size > 0) scheduleNameFlush()
+    })
+}
+
+function scheduleNameFlush(): void {
+  if (nameFlushTimer) return
+  nameFlushTimer = setTimeout(flushProcessNameLookups, 400)
+  ;(nameFlushTimer as any).unref?.()
+}
 
 function resolveProcessName(pid: number): string {
   if (pid <= 0) return ''
   const now = Date.now()
   const hit = processNameCache.get(pid)
   if (hit && now - hit.ts < PROCESS_NAME_TTL) return hit.name
-  let name = ''
-  try {
-    const out = execSync(
-      `Get-Process -Id ${pid} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName`,
-      { shell: 'powershell', encoding: 'utf-8', windowsHide: true, timeout: 2000 },
-    )
-    name = out.trim()
-  } catch {
-    /* ignore */
+  if (!pendingNameLookups.has(pid) && pendingNameLookups.size < MAX_PENDING_LOOKUPS) {
+    pendingNameLookups.add(pid)
+    scheduleNameFlush()
   }
-  processNameCache.set(pid, { name, ts: now })
-  if (processNameCache.size > 2000) {
-    const keep = [...processNameCache.entries()].slice(-1000)
-    processNameCache.clear()
-    for (const [k, v] of keep) processNameCache.set(k, v)
-  }
-  return name
+  return hit?.name ?? ''
 }
 
 function ingestEvent(evt: Partial<ProcessEvent>) {
@@ -160,32 +254,6 @@ try {
   }
 } catch {
   Write-Error "ETW_FAILED: $_"
-}
-`
-
-const snapshotPsScript = `
-$ErrorActionPreference = 'SilentlyContinue'
-$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
-# 间隔放大到 30s 后，主进程 fork powershell + Get-Process 全列的频率从每 5s 降到每 30s，
-# 大幅减少主进程事件循环上的高频 IO 抢占——避免与 chokidar / SQLite 抢资源。
-$sleepSec = ${Math.floor(SNAPSHOT_INTERVAL_MS / 1000)}
-
-while ($true) {
-  try {
-    $procs = Get-Process | Where-Object { $_.Id -gt 0 } | Select-Object Id, ProcessName, Path
-    $arr = @()
-    foreach ($p in $procs) {
-      $arr += [ordered]@{
-        pid = [int]$p.Id
-        processName = [string]$p.ProcessName
-        path = [string]$p.Path
-        timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-      }
-    }
-    Write-Host (@{ snapshot = $arr } | ConvertTo-Json -Compress)
-  } catch {}
-  Start-Sleep -Seconds $sleepSec
 }
 `
 
@@ -319,11 +387,28 @@ async function startEtwTracking(): Promise<void> {
   })
 }
 
+// 轻采样模式：Node 定时跑 tasklist（原生工具，毫秒级启动、退出即释放全部资源），
+// 不再常驻任何 PowerShell 子进程 —— 旧方案的光 powershell.exe 本身就常驻 100~200MB。
+// 代价：tasklist 拿不到 exe 完整路径，快照事件的 path 为空，
+// lookupProcess 里「exe 同目录加权」这条启发式会弱化，但按时效/进程名的匹配仍然有效。
 function startSnapshotTracking() {
-  if (snapshotProcess && !snapshotProcess.killed) return
+  if (snapshotTimer) return
   mode = 'snapshot'
-  snapshotProcess = spawnPowerShell(snapshotPsScript)
-  bindChildOutput(snapshotProcess, 'Snapshot')
+  const sampleOnce = () => {
+    runTasklist()
+      .then((rows) => {
+        const now = Date.now()
+        for (const row of rows) {
+          ingestEvent({ pid: row.pid, processName: row.name, path: '', timestamp: now })
+        }
+      })
+      .catch((err) => {
+        lastError = String((err as Error)?.message || err)
+      })
+  }
+  sampleOnce()
+  snapshotTimer = setInterval(sampleOnce, SNAPSHOT_INTERVAL_MS)
+  ;(snapshotTimer as any).unref?.()
 }
 
 export function startProcessTracking() {
@@ -338,21 +423,35 @@ export function startProcessTracking() {
     cleanupTimer = setInterval(cleanupOldEvents, CLEANUP_INTERVAL_MS)
   }
 
-  // ETW 实时文件监听需要管理员权限启用 Microsoft-Windows-Kernel-File 提供程序。
-  // 非管理员环境下 Get-WinEvent 必然失败并退出（exit 1），因此直接走快照模式，
-  // 避免无意义的 ETW 尝试、3 秒等待与噪声日志。
-  if (!isElevated()) {
-    lastError = '需要管理员权限才能启用 ETW 实时监听，已使用快照模式'
-    logToDb('info', 'processTracker', '未以管理员身份运行，ETW 需管理员权限，直接使用快照模式', '')
-    startSnapshotTracking()
+  // ETW 会执行 wevtutil 启用**全系统**的 Kernel-File 事件通道（所有文件 I/O 都
+  // 进事件日志，系统级内存/磁盘开销巨大），因此改为显式 opt-in：
+  // 设置 process_tracker_etw=true 且以管理员运行时才启用；默认走 tasklist 轻采样。
+  let etwEnabled = false
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'process_tracker_etw'").get() as
+      | { value: string }
+      | undefined
+    if (row) etwEnabled = JSON.parse(row.value) === true
+  } catch {
+    /* ignore */
+  }
+
+  if (etwEnabled) {
+    if (!isElevated()) {
+      lastError = 'ETW 实时监听需要管理员权限，已使用轻采样模式'
+      logToDb('info', 'processTracker', '未以管理员身份运行，ETW 需管理员权限，使用轻采样模式', '')
+      startSnapshotTracking()
+      return
+    }
+    // Prefer ETW; fall back to snapshot immediately on failure.
+    startEtwTracking().catch((err) => {
+      logToDb('info', 'processTracker', 'ETW 不可用，降级到轻采样模式', err.message)
+      startSnapshotTracking()
+    })
     return
   }
 
-  // Prefer ETW; fall back to snapshot immediately on failure.
-  startEtwTracking().catch((err) => {
-    logToDb('info', 'processTracker', 'ETW 不可用，降级到快照模式', err.message)
-    startSnapshotTracking()
-  })
+  startSnapshotTracking()
 }
 
 export function stopProcessTracking() {
@@ -360,9 +459,9 @@ export function stopProcessTracking() {
     etwProcess.kill()
     etwProcess = null
   }
-  if (snapshotProcess && !snapshotProcess.killed) {
-    snapshotProcess.kill()
-    snapshotProcess = null
+  if (snapshotTimer) {
+    clearInterval(snapshotTimer)
+    snapshotTimer = null
   }
   if (cleanupTimer) {
     clearInterval(cleanupTimer)
@@ -376,10 +475,18 @@ export function stopProcessTracking() {
   eventCount = 0
 }
 
+// 重建节流：lookupProcess 位于每个文件事件的热路径上。事件风暴时每条事件都
+// 会触发 buildSortedEvents（对最多 5000 条全量排序）—— O(n log n)/事件。
+// 加 500ms 最小重建间隔：归因精度本就是秒级，代价几乎为零。
+const SORTED_REBUILD_MIN_INTERVAL_MS = 500
+let lastSortedBuildAt = 0
+
 function buildSortedEvents() {
   if (!sortedEventsDirty) return
-  sortedEvents.length = 0
   const now = Date.now()
+  if (now - lastSortedBuildAt < SORTED_REBUILD_MIN_INTERVAL_MS) return
+  lastSortedBuildAt = now
+  sortedEvents.length = 0
   for (const evt of eventStore.values()) {
     if (!evt.processName) continue
     if (now - evt.timestamp >= MAX_AGE_MS) continue

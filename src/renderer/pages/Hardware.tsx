@@ -187,8 +187,20 @@ export default function Hardware() {
   useEffect(() => {
     void loadHw()
     void loadLive()
-    const liveTimer = setInterval(() => void loadLive(), 2000)
-    return () => clearInterval(liveTimer)
+    // 2s 一次实时指标，每次都落到主进程的 PowerShell（CPU/内存/温度 WMI）。
+    // 页面不可见时必须停掉，否则最小化到托盘后仍在稳定烧 CPU。
+    const liveTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      void loadLive()
+    }, 2000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void loadLive()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(liveTimer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

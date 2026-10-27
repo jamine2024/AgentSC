@@ -11,6 +11,21 @@ const dbPath = path.join(dbDir, 'agentsc.db')
 const db = new Database(dbPath)
 
 db.pragma('journal_mode = WAL')
+// 性能相关 PRAGMA：
+// - synchronous=NORMAL：WAL 下仍然崩溃安全（最坏丢最近一个事务），但避免了每次
+//   提交都 fsync。better-sqlite3 是同步 API，fsync 期间整个主线程停摆 —— 事件批量
+//   写入（每 2s 一次）与看板聚合查询都会受此影响，机械盘上尤其明显。
+// - cache_size / mmap_size：减少频繁的页读取与 syscall，聚合查询更快返回。
+// - busy_timeout：避免索引器与事件写入撞车时直接抛 SQLITE_BUSY。
+db.pragma('synchronous = NORMAL')
+db.pragma('busy_timeout = 8000')
+db.pragma('cache_size = -16000')
+db.pragma('temp_store = MEMORY')
+try {
+  db.pragma('mmap_size = 268435456')
+} catch {
+  // 部分文件系统/安全策略下 mmap 不可用，忽略即可
+}
 
 export function initSchema() {
   db.exec(`
@@ -32,6 +47,13 @@ export function initSchema() {
     -- 复合索引：加速 getTopProcesses 的 day + process_name 聚合（高频看板查询）
     CREATE INDEX IF NOT EXISTS idx_file_events_day_process
       ON file_events(day, process_name) WHERE process_name IS NOT NULL;
+    -- 复合索引：看板的「今日统计 / 趋势 / Top 路径」全部是 WHERE day=? AND type=?
+    -- 的聚合，单列索引只能命其一，SQLite 仍需回表逐行过滤；库里积累几十万条后
+    -- 这几个查询每 2s 跑一次，会直接把主线程的同步 SQLite 调用拖成几十毫秒级。
+    CREATE INDEX IF NOT EXISTS idx_file_events_day_type
+      ON file_events(day, type);
+    CREATE INDEX IF NOT EXISTS idx_file_events_day_type_size
+      ON file_events(day, type, size);
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -287,12 +309,14 @@ export function addExclusionRule(rule: ExclusionRule) {
     INSERT INTO exclusion_rules (pattern, reason, enabled, created_at)
     VALUES (@pattern, @reason, @enabled, @created_at)
   `)
-  return stmt.run({
+  const info = stmt.run({
     pattern: rule.pattern,
     reason: rule.reason || '',
     enabled: rule.enabled ?? 1,
     created_at: rule.created_at || Date.now(),
   })
+  invalidateExclusionCache()
+  return info
 }
 
 export function updateExclusionRule(id: number, rule: Partial<ExclusionRule>) {
@@ -304,12 +328,14 @@ export function updateExclusionRule(id: number, rule: Partial<ExclusionRule>) {
     SET pattern = @pattern, reason = @reason, enabled = @enabled
     WHERE id = @id
   `)
-  return stmt.run({
+  const info = stmt.run({
     id,
     pattern: next.pattern,
     reason: next.reason || '',
     enabled: next.enabled ?? 1,
   })
+  invalidateExclusionCache()
+  return info
 }
 
 export function deleteExclusionRule(id: number) {
@@ -320,6 +346,7 @@ export function deleteExclusionRule(id: number) {
   // 系统默认排除规则不可删除
   if (rule.is_default) return { ok: false, error: 'builtin' }
   const res = db.prepare('DELETE FROM exclusion_rules WHERE id = ?').run(id)
+  invalidateExclusionCache()
   return { ok: true, changes: res.changes }
 }
 
@@ -346,6 +373,7 @@ export function importExclusionRules(rules: Array<{ pattern: string; reason?: st
     return added
   })
   const added = tx(rules)
+  invalidateExclusionCache()
   return { added, skipped: rules.length - added }
 }
 
@@ -809,28 +837,70 @@ export function clearFileEvents() {
 
 // 滚动清理：仅保留最近 keepDays 天的文件事件，防止 file_events 表无界膨胀
 // （开启监控长时运行后行数可达数十万→百万，直接拖高内存与磁盘占用、拖慢聚合查询）。
-export function pruneFileEvents(keepDays = 30) {
-  const cutoff = new Date(Date.now() - keepDays * 24 * 60 * 60 * 1000)
-  const cutoffDay = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`
-  // day 字段为 'YYYY-MM-DD'，按字典序比较即可；并兜底删除 > 365 天（极端脏数据）
+// ── 滚动清理（分批执行）──
+// 旧实现是单条大 DELETE：事件表积累几十万行后，一次删除要长时间持有写锁，
+// better-sqlite3 是同步 API，主线程会在整个事务期间停摆（启动时正好撞上首屏），
+// 大事务还会把 WAL 撑得很大。改为按主键分批删（每批 5000 条、批间让出事件循环），
+// 删完做一次 wal_checkpoint(TRUNCATE) 把 WAL 收缩回去。
+const PRUNE_BATCH_SIZE = 5000
+const PRUNE_MAX_BATCHES = 400 // 单次最多删 200 万行，防异常数据导致无限循环
+
+function yieldTick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+function checkpointWal(): void {
   try {
-    const r = db.prepare("DELETE FROM file_events WHERE day < ? OR day < '2000-01-01'").run(cutoffDay)
-    return r.changes
+    db.pragma('wal_checkpoint(TRUNCATE)')
   } catch {
-    return 0
+    /* 有并发读时 checkpoint 可能 busy，忽略即可 */
   }
 }
 
-// 滚动清理：仅保留最近 keepDays 天的应用日志
-export function pruneAppLogs(keepDays = 30) {
+export async function pruneFileEvents(keepDays = 30): Promise<number> {
   const cutoff = new Date(Date.now() - keepDays * 24 * 60 * 60 * 1000)
-  const iso = cutoff.toISOString()
+  const cutoffDay = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`
+  // day 字段为 'YYYY-MM-DD'，按字典序比较即可；并兜底删除 > 365 天（极端脏数据）
+  let deleted = 0
   try {
-    const r = db.prepare('DELETE FROM app_logs WHERE created_at < ?').run(iso)
-    return r.changes
+    const stmt = db.prepare(
+      "DELETE FROM file_events WHERE id IN (SELECT id FROM file_events WHERE day < ? OR day < '2000-01-01' LIMIT ?)",
+    )
+    for (let i = 0; i < PRUNE_MAX_BATCHES; i++) {
+      const r = stmt.run(cutoffDay, PRUNE_BATCH_SIZE)
+      deleted += r.changes
+      if (r.changes < PRUNE_BATCH_SIZE) break
+      await yieldTick()
+    }
+    checkpointWal()
   } catch {
-    return 0
+    return deleted
   }
+  return deleted
+}
+
+// 滚动清理：仅保留最近 keepDays 天的应用日志
+export async function pruneAppLogs(keepDays = 30): Promise<number> {
+  // created_at 存的是 Date.now() 毫秒整数，之前拿 ISO 字符串去比较：
+  // SQLite 的类型排序里「整数 < 文本」恒成立，于是这条 DELETE 实际清空了整张
+  // app_logs 表 —— 每天都把日志抹掉，排查卡顿/崩溃时恰恰没有历史可看。
+  const cutoffMs = Date.now() - keepDays * 24 * 60 * 60 * 1000
+  let deleted = 0
+  try {
+    const stmt = db.prepare(
+      'DELETE FROM app_logs WHERE id IN (SELECT id FROM app_logs WHERE created_at < ? LIMIT ?)',
+    )
+    for (let i = 0; i < PRUNE_MAX_BATCHES; i++) {
+      const r = stmt.run(cutoffMs, PRUNE_BATCH_SIZE)
+      deleted += r.changes
+      if (r.changes < PRUNE_BATCH_SIZE) break
+      await yieldTick()
+    }
+    checkpointWal()
+  } catch {
+    return deleted
+  }
+  return deleted
 }
 
 export function clearCleanerLogs() {
@@ -841,13 +911,42 @@ export function clearAppLogs() {
   return db.prepare('DELETE FROM app_logs').run()
 }
 
-export function isPathExcluded(filePath: string) {
-  const rules = getExclusionRules().filter((r) => r.enabled === 1)
-  return rules.some((rule) => {
+// ── 排除规则匹配缓存 ─────────────────────────────────────────────
+// isPathExcluded 位于每个文件事件的热路径上（watcher.recordEvent / scanner 遍历）。
+// 旧实现每次都做一遍「查表 + 过滤 + 逐条 replace 构造 RegExp」，文件事件密集时
+// （例如解压大包、编译构建）会在主进程同步堆出大量重复工作：一条 SQL 全表扫描加
+// N 次正则编译，全部跑在 Electron 主线程上，直接卡住渲染进程的 IPC 响应。
+// 这里把「启用中的规则」编译结果缓存起来，仅在规则增删改后失效。
+interface CompiledExclusionRule { regex: RegExp; source: string }
+let exclusionRegexCache: CompiledExclusionRule[] | null = null
+
+/** 规则变更后调用，丢弃已编译的正则缓存 */
+export function invalidateExclusionCache() {
+  exclusionRegexCache = null
+}
+
+function getCompiledExclusionRules(): CompiledExclusionRule[] {
+  if (exclusionRegexCache) return exclusionRegexCache
+  const compiled: CompiledExclusionRule[] = []
+  for (const rule of getExclusionRules()) {
+    if (rule.enabled !== 1) continue
     const pat = rule.pattern.replace(/\\/g, '\\\\').replace(/\*/g, '.*').replace(/\?/g, '.')
-    const regex = new RegExp(`^${pat}$`, 'i')
-    return regex.test(filePath)
-  })
+    try {
+      compiled.push({ regex: new RegExp(`^${pat}$`, 'i'), source: rule.pattern })
+    } catch {
+      // 非法通配符（用户手输的规则）不应拖垮整条热路径
+    }
+  }
+  exclusionRegexCache = compiled
+  return compiled
+}
+
+export function isPathExcluded(filePath: string) {
+  const rules = getCompiledExclusionRules()
+  for (let i = 0; i < rules.length; i++) {
+    if (rules[i].regex.test(filePath)) return true
+  }
+  return false
 }
 
 // ====== 系统定时任务（scheduled_tasks） ======

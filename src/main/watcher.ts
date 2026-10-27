@@ -19,6 +19,7 @@ const IPC_BATCH_INTERVAL_MS = 500    // 每 500ms 批量发一次 IPC 给渲染�
 const PATH_DEBOUNCE_MS = 200          // 同一路径 200ms 内只保留最新事件
 const MAX_BATCH_SIZE = 500            // 单批最大 500 条
 const IPC_BATCH_LIMIT = 50            // 给渲染进程的单批上限（之前 100）
+const IPC_BATCH_MAX_SENDS = 10        // 单轮最多发出的包数（500ms 内最多推送 500 条）
 
 const pendingEvents: FileEventRow[] = []
 const pendingIpcEvents: FileEventRow[] = []
@@ -27,13 +28,25 @@ const recentPaths = new Map<string, number>()  // path -> last timestamp
 let batchTimer: NodeJS.Timeout | null = null
 let ipcBatchTimer: NodeJS.Timeout | null = null
 
+// 单次 flush 的条数上限：原实现每 2s 只 drain 一批 500 条，事件速率一旦超过
+// 250 条/秒（解压大包、批量编译、同步网盘），缓冲区就会无界增长 —— 内存持续上涨，
+// 每轮 flush 的 payload 也越大，主线程越来越卡。这里改为把窗口内的积压一次写完
+// （仍受总上限约束），并把超限溢出直接丢弃计数，保证内存有界。
+const PENDING_DB_CAP = 20_000
+const PENDING_IPC_CAP = 2_000
+let droppedEvents = 0
+
 function flushDbBatch() {
   if (pendingEvents.length === 0) return
-  const batch = pendingEvents.splice(0, MAX_BATCH_SIZE)
-  try {
-    insertEvents(batch)
-  } catch (err) {
-    logToDb('error', 'watcher', '事件批量写入失败', String(err))
+  // 按 MAX_BATCH_SIZE 分块写入，避免单个事务过大长时间占用主线程
+  while (pendingEvents.length > 0) {
+    const batch = pendingEvents.splice(0, MAX_BATCH_SIZE)
+    try {
+      insertEvents(batch)
+    } catch (err) {
+      logToDb('error', 'watcher', '事件批量写入失败', String(err))
+      break
+    }
   }
 }
 
@@ -43,8 +56,16 @@ function flushIpcBatch() {
     pendingIpcEvents.length = 0
     return
   }
-  const batch = pendingIpcEvents.splice(0, IPC_BATCH_LIMIT)
-  mainWindow.webContents.send('file-events-batch', batch)
+  // 积压时分多次发出，而不是每轮只发 50 条。原实现把上限当成吞吐量，
+  // 事件速率 > 100 条/秒时缓冲只增不减，渲染端实时流彻底滞后且内存持续上涨。
+  // 每轮最多发 IPC_BATCH_MAX_SENDS 包，单包仍受 IPC_BATCH_LIMIT 约束，
+  // 既不让单条 IPC 消息过大（序列化开销），也不让积压无限期滞留。
+  let sends = 0
+  while (pendingIpcEvents.length > 0 && sends < IPC_BATCH_MAX_SENDS) {
+    const batch = pendingIpcEvents.splice(0, IPC_BATCH_LIMIT)
+    mainWindow.webContents.send('file-events-batch', batch)
+    sends += 1
+  }
 }
 
 function ensureBatchTimers() {
@@ -72,12 +93,22 @@ function stopBatchTimers() {
 // 定期删除过期（> 60s）条目；极端情况下仍过大则整体重置（仅影响去重，可接受）。
 const RECENT_PATHS_MAX_AGE_MS = 60_000
 const RECENT_PATHS_SWEEP_EVERY = 1000
-const RECENT_PATHS_HARD_CAP = 200_000
+// 硬上限：20k。这里的 Map 只服务于 200ms 窗口去重，正常根本攒不到几千条；
+// 旧上限 20 万条在最坏情况（每条都是长路径字符串）可占几十 MB 常驻内存。
+const RECENT_PATHS_HARD_CAP = 20_000
+const SWEEP_PAGE = 5_000          // 单次清扫最多检查的条目数
 let recentPathsWrites = 0
 function sweepRecentPaths(): void {
+  // 原实现每 1000 次写入就遍历整张表（可达 20 万条）并逐条 delete，
+  // 相当于周期性把主线程钉住几十毫秒。改为分批扫描：每次只处理一小段，
+  // 一轮打不完下轮继续（去重精度偶发变宽松，可接受）。
   const now = Date.now()
+  const limit = Math.min(recentPaths.size, SWEEP_PAGE)
+  if (limit === 0) return
+  let scanned = 0
   for (const [p, ts] of recentPaths) {
     if (now - ts > RECENT_PATHS_MAX_AGE_MS) recentPaths.delete(p)
+    if (++scanned >= limit) break
   }
   if (recentPaths.size > RECENT_PATHS_HARD_CAP) recentPaths.clear()
 }
@@ -110,14 +141,51 @@ function shouldSkip(filePath: string) {
   return false
 }
 
+// 大文件阈值原先每个 created 事件都同步查一次 SQLite。批量落盘场景下这是
+// 每秒上千次的同步查询，全部压在主线程。加缓存 + 设置变更时显式失效。
+const LARGE_FILE_THRESHOLD_TTL_MS = 30_000
+let largeFileThresholdCache: { at: number; value: number } | null = null
+
+export function invalidateLargeFileThresholdCache() {
+  largeFileThresholdCache = null
+}
+
 function getLargeFileThreshold(): number {
+  const now = Date.now()
+  if (largeFileThresholdCache && now - largeFileThresholdCache.at < LARGE_FILE_THRESHOLD_TTL_MS) {
+    return largeFileThresholdCache.value
+  }
+  let value = 100
   try {
     const row = db.prepare("SELECT value FROM settings WHERE key = 'large_file_threshold_mb'").get() as { value: string } | undefined
-    if (!row) return 100
-    const val = JSON.parse(row.value)
-    return typeof val === 'number' && val > 0 ? val : 100
+    if (row) {
+      const val = JSON.parse(row.value)
+      if (typeof val === 'number' && val > 0) value = val
+    }
   } catch {
-    return 100
+    value = 100
+  }
+  largeFileThresholdCache = { at: now, value }
+  return value
+}
+
+// stat 并发闸门：每个事件一次 fs.stat，事件风暴时同时挂起成千上万个 promise 会
+// 把 libuv 线程池（默认 4 个）彻底压满，连带所有异步 IO（含 IPC 的 SQLite 写入）一起排队。
+const MAX_CONCURRENT_STAT = 16
+let statInFlight = 0
+const statWaiters: Array<() => void> = []
+
+async function withStatSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (statInFlight >= MAX_CONCURRENT_STAT) {
+    await new Promise<void>((resolve) => statWaiters.push(resolve))
+  }
+  statInFlight += 1
+  try {
+    return await fn()
+  } finally {
+    statInFlight -= 1
+    const next = statWaiters.shift()
+    if (next) next()
   }
 }
 
@@ -135,7 +203,7 @@ async function recordEvent(
   recentPaths.set(filePath, timestamp)
   if (++recentPathsWrites % RECENT_PATHS_SWEEP_EVERY === 0) sweepRecentPaths()
 
-  const size = type === 'deleted' ? 0 : await getSize(filePath)
+  const size = type === 'deleted' ? 0 : await withStatSlot(() => getSize(filePath))
   const drive = getDrive(filePath)
   const day = getDay(timestamp)
   const proc = lookupProcess(filePath)
@@ -151,7 +219,19 @@ async function recordEvent(
     day,
   }
 
+  // 缓冲上限：溢出时整块丢弃最旧的一段，保证长时高负载下内存有界。
+  // 注意不能用 Array.shift()：它是 O(n) 移动全部元素，在"每个事件都溢出"的极端
+  // 场景下等于把 2 万条数组每来一个事件就整体搬一次，卡顿反而被放大。
+  // 这里按 1/8 容量成块丢弃，摊还成本接近 O(1)。
+  if (pendingEvents.length >= PENDING_DB_CAP) {
+    const dropCount = Math.floor(PENDING_DB_CAP / 8)
+    pendingEvents.splice(0, dropCount)
+    droppedEvents += dropCount
+  }
   pendingEvents.push(row)
+  if (pendingIpcEvents.length >= PENDING_IPC_CAP) {
+    pendingIpcEvents.splice(0, Math.floor(PENDING_IPC_CAP / 8))
+  }
   pendingIpcEvents.push(row)
 
   // 大文件检测与通知（立即处理，不缓冲）
@@ -269,10 +349,18 @@ export async function startWatching(config: WatcherConfig) {
       },
     })
 
+    // 回调里的异步错误必须在这里吃掉：recordEvent 是 async，未 catch 的 rejection
+    // 会变成 unhandledRejection，Electron 主进程会把它当致命错误处理。
+    const safeRecord = (type: 'created' | 'modified' | 'deleted', filePath: string) => {
+      recordEvent(type, filePath).catch((err) => {
+        logToDb('warn', 'watcher', '事件记录失败', String(err))
+      })
+    }
+
     watcher
-      .on('add', (filePath) => recordEvent('created', filePath))
-      .on('change', (filePath) => recordEvent('modified', filePath))
-      .on('unlink', (filePath) => recordEvent('deleted', filePath))
+      .on('add', (filePath) => safeRecord('created', filePath))
+      .on('change', (filePath) => safeRecord('modified', filePath))
+      .on('unlink', (filePath) => safeRecord('deleted', filePath))
       .on('addDir', () => {})
       .on('unlinkDir', () => {})
       .on('error', (err) => logToDb('error', 'watcher', `监控器错误: ${p}`, String(err)))
@@ -293,5 +381,6 @@ export function getWatcherStatus() {
     active: watchers.length > 0,
     paths: watchers.map((_, i) => `watcher-${i}`),
     processTracker: getProcessTrackerStatus(),
+    droppedEvents,
   }
 }

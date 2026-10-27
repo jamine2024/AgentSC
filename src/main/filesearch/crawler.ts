@@ -17,8 +17,29 @@ import { logToDb } from '../db'
 
 const execFileP = promisify(execFile)
 
-const BATCH = 2000
+const BATCH = 200
 const MAX_DEPTH = 60
+
+// ── 分片节拍插入 ──
+// 旧实现把 2000 行塞进**一个同步事务**：FTS5 trigram 每行要对 name+path 切出
+// 几十个 token 维护倒排索引，单个事务轻松超过 1 秒 —— 期间主进程完全冻结
+//（IPC、输入、渲染全部停摆），且每次积满 2000 个文件就冻结一次，正是
+//「界面容易卡死」的元凶。现在按 100 行一片提交，片间让出事件循环并小憩，
+// 把长冻结切成无感的碎片。
+const INSERT_CHUNK = 100
+const CHUNK_GAP_MS = 8
+const BATCH_REST_MS = 20
+
+async function insertBatchPaced(rows: FileRow[]): Promise<void> {
+  for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+    insertFileBatch(rows.slice(i, i + INSERT_CHUNK))
+    if (i + INSERT_CHUNK < rows.length) {
+      await new Promise((r) => setTimeout(r, CHUNK_GAP_MS))
+    }
+  }
+  await new Promise((r) => setTimeout(r, BATCH_REST_MS))
+}
+
 // 受保护 / 无读取权限的系统目录，直接跳过（不进入递归）
 const PROTECTED_DIRS = new Set([
   '$Recycle.Bin',
@@ -27,6 +48,25 @@ const PROTECTED_DIRS = new Set([
   '$SysReset',
   'Documents and Settings',
 ])
+
+// 重目录跳过：这些目录文件量巨大（一台开发机动辄几十万文件的来源），对用户
+// 「全盘找文件」几乎没有价值，且是拖慢建索、撑大 FTS 库的最大来源。
+// 与 watcher 的排除口径保持一致（node_modules / 系统目录 / 缓存 / 隐藏目录）。
+const SKIP_DIR_NAMES = new Set([
+  'node_modules', '.git', '.svn', '.hg', '$recycle.bin', 'system volume information',
+  'windows', 'program files', 'program files (x86)', 'programdata', 'appdata',
+  'application data', 'cache', 'caches', '.cache', '.npm', '.next', '.nuxt',
+  '.turbo', '.pnpm-store', '.vscode', '.idea', '.gradle', '.m2', 'target',
+  '.docker', 'containers',
+])
+
+function isSkipDirName(name: string): boolean {
+  const lower = name.toLowerCase()
+  if (SKIP_DIR_NAMES.has(lower)) return true
+  // 隐藏目录（点开头但非 "." / ".."）
+  if (lower.length > 1 && lower.startsWith('.')) return true
+  return false
+}
 
 /** 取本地固定盘符列表，如 ['C:','D:'] */
 export async function getFixedDrives(): Promise<string[]> {
@@ -78,7 +118,7 @@ async function walk(dir: string, depth: number, ctx: CrawlCtx): Promise<void> {
 
   for (const e of entries) {
     if (e.name === '.' || e.name === '..') continue
-    if (PROTECTED_DIRS.has(e.name)) continue
+    if (PROTECTED_DIRS.has(e.name) || isSkipDirName(e.name)) continue
     const full = path.join(dir, e.name)
 
     let st: fs.Stats
@@ -115,10 +155,9 @@ async function walk(dir: string, depth: number, ctx: CrawlCtx): Promise<void> {
     ctx.count++
 
     if (ctx.buffer.length >= BATCH) {
-      insertFileBatch(ctx.buffer)
+      await insertBatchPaced(ctx.buffer)
       ctx.buffer = []
       ctx.onProgress(ctx.count)
-      await new Promise((r) => setImmediate(r))
     }
 
     if (isDir && !isSymlink) {
@@ -146,7 +185,7 @@ export async function crawlDrive(drive: string, onProgress: (count: number) => v
     logToDb('error', 'filesearch', `爬取 ${normDrive} 异常`, String(err))
   }
   if (ctx.buffer.length > 0) {
-    insertFileBatch(ctx.buffer)
+    await insertBatchPaced(ctx.buffer)
     ctx.buffer = []
     onProgress(ctx.count)
   }

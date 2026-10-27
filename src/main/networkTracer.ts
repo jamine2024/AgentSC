@@ -188,6 +188,16 @@ let lastSampleAt = 0
 let startedAt = 0
 let eventSeq = 0
 
+// 按需采样：采集本身每轮都要 fork 一次 PowerShell（Get-NetTCPConnection +
+// 逐 PID 的 Get-Process），开机后无条件常驻等于让主进程每 4 秒被外部进程抢一次
+// CPU，用户即使从没打开过「网络追踪」页面也要付这笔开销。
+// 改为「有消费者才跑、没消费者自动停」：任一个 network:* IPC 都会 touch 一次，
+// 超过 IDLE_STOP_MS 无人访问就自行停止采样。
+const IDLE_STOP_MS = 90_000
+let lastAccessAt = 0
+// 用户显式 stop 之后，不能被下一轮轮询的 touch 立刻重新拉起
+let autoStartBlocked = false
+
 function makeId(c: RawConnection): string {
   return `${c.protocol}|${c.localAddress}|${c.localPort}|${c.remoteAddress}|${c.remotePort}|${c.owningProcess}`
 }
@@ -252,6 +262,18 @@ async function resolveHostsForActive() {
 }
 
 async function sample() {
+  // 长时间无人查看 → 自行停采，把主进程还给前台交互。
+  // 这是"空闲停采"，不是用户意图，因此不设置 autoStartBlocked：
+  // 下一个消费者（重新打开网络追踪页）访问时应当能再次拉起。
+  if (active && lastAccessAt && Date.now() - lastAccessAt > IDLE_STOP_MS) {
+    active = false
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+    logToDb('info', 'network', '网络追踪空闲停采', `idle>${IDLE_STOP_MS}ms`)
+    return
+  }
   try {
     const { conns, procs } = await runSnapshot()
     const now = Date.now()
@@ -307,6 +329,8 @@ async function sample() {
 // ── 对外 API ──
 
 export function startNetworkTracer(interval = DEFAULT_INTERVAL) {
+  lastAccessAt = Date.now()
+  autoStartBlocked = false
   if (active) {
     if (interval) setNetInterval(interval)
     return
@@ -319,8 +343,15 @@ export function startNetworkTracer(interval = DEFAULT_INTERVAL) {
   logToDb('info', 'network', '网络追踪已启动', `interval=${intervalMs}ms`)
 }
 
+/** 标记「当前有消费者」，并在需要时惰性启动采样 */
+export function touchNetworkTracer(): void {
+  lastAccessAt = Date.now()
+  if (!active && !autoStartBlocked) startNetworkTracer(intervalMs)
+}
+
 export function stopNetworkTracer() {
   active = false
+  autoStartBlocked = true
   if (timer) {
     clearInterval(timer)
     timer = null
@@ -346,10 +377,12 @@ export function clearNetEvents() {
 }
 
 export function snapshotNetNow() {
+  lastAccessAt = Date.now()
   return sample()
 }
 
 export function getNetConnections(): NetConnection[] {
+  lastAccessAt = Date.now()
   return Array.from(activeMap.values()).sort((a, b) => {
     if (a.isExternal !== b.isExternal) return a.isExternal ? -1 : 1
     return b.lastSeen - a.lastSeen
@@ -357,10 +390,12 @@ export function getNetConnections(): NetConnection[] {
 }
 
 export function getNetEvents(limit = 200): NetEvent[] {
+  lastAccessAt = Date.now()
   return eventLog.slice(-limit).reverse()
 }
 
 export function getNetStatus(): NetStatus {
+  lastAccessAt = Date.now()
   let ext = 0
   for (const c of activeMap.values()) if (c.isExternal) ext += 1
   return {

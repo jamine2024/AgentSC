@@ -1,6 +1,6 @@
 {
   "name": "agentsc",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "AI 驱动的磁盘文件变更跟踪软件",
   "main": "./out/main/main.js",
   "author": "AgentSC",

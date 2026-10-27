@@ -241,10 +241,15 @@ export default function TaskManager() {
   useEffect(() => {
     void loadProcs()
     void loadLive()
+    // 页面不可见（最小化到托盘 / 切到别的 tab）时不再轮询：
+    // list-processes 背后是一段带 Start-Sleep 1s 的 PowerShell，空转成本很高。
+    const visible = () => typeof document === 'undefined' || document.visibilityState === 'visible'
     const procTimer = setInterval(() => {
-      if (autoRefresh) void loadProcs()
+      if (autoRefresh && visible()) void loadProcs()
     }, 5000)
-    const liveTimer = setInterval(() => void loadLive(), 5000)
+    const liveTimer = setInterval(() => {
+      if (visible()) void loadLive()
+    }, 5000)
     return () => {
       clearInterval(procTimer)
       clearInterval(liveTimer)

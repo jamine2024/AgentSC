@@ -123,9 +123,15 @@ export function GlobalSearch({ open, onClose }: GlobalSearchProps) {
     }
   }, [open])
 
+  // 输入防抖 250ms：query 背后是主进程的同步 FTS/LIKE 查询，每个按键都打一次
+  // 会在建索期间 / 大索引下把主进程连续钉住（打字直接卡死）。250ms 对输入
+  // 手感无感，查询次数却从「每键一次」降到「停顿才查」。
   useEffect(() => {
-    query(text)
-    setActive(0)
+    const t = setTimeout(() => {
+      query(text)
+      setActive(0)
+    }, 250)
+    return () => clearTimeout(t)
   }, [text])
 
   // 定时刷新状态（建索引进度）

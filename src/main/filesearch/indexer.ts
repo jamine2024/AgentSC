@@ -25,15 +25,35 @@ import { crawlAll, getFixedDrives } from './crawler'
 import { db, logToDb } from '../db'
 import type { FileResult, FileSearchStatus } from './types'
 
-const REINDEX_INTERVAL_MS = 6 * 60 * 60 * 1000
+// 全盘重扫策略：整盘爬取是重 IO + 大量 FTS 写入的操作，旧版固定每 6h 无条件
+// 重扫一次，长时间挂机的机器每隔几小时就磁盘抖动一轮。现在改为：
+//   - 默认关闭（0），完全依赖 chokidar 增量事件维持索引新鲜度；
+//   - 需要周期性兜底的用户可设置 filesearch_reindex_hours（如 24）打开，
+//     到期后每小时检查一次是否触发。
+const REINDEX_CHECK_INTERVAL_MS = 60 * 60 * 1000
+
+function getReindexHours(): number {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'filesearch_reindex_hours'").get() as
+      | { value: string }
+      | undefined
+    if (!row) return 0
+    const v = JSON.parse(row.value)
+    return typeof v === 'number' && v > 0 ? v : 0
+  } catch {
+    return 0
+  }
+}
 
 class FileSearchIndexer {
   private indexing = false
   private ready = false
+  private needsFullCrawl = false
   private scanned = 0
   private drives: string[] = []
   private chain: Promise<unknown> = Promise.resolve()
   private initDone = false
+  private lastCrawlAt = 0
   private reindexTimer: ReturnType<typeof setInterval> | null = null
   private watcher: FSWatcher | null = null
 
@@ -43,12 +63,25 @@ class FileSearchIndexer {
     initFileSearchDb()
     const count = countFiles()
     if (count === 0) {
-      this.startFullCrawl()
+      // 全盘爬取不在启动窗口内立刻跑：即使已分片节拍化，它仍是持续的重 IO。
+      // 延后 90s（或用户首次打开全局搜索时立即触发），保证启动后的前一分多钟
+      // 界面绝对流畅。旧版在这里直接 startFullCrawl，是「界面容易卡死」的元凶。
+      this.needsFullCrawl = true
+      setTimeout(() => this.ensureCrawlStarted(), 90_000)
     } else {
       this.ready = true
+      // 已有索引视为新鲜起点，周期性重扫从现在起算
+      this.lastCrawlAt = Date.now()
       this.scheduleReindex()
       this.startWatching()
     }
+  }
+
+  /** 全盘爬取的惰性启动点：90s 延迟兜底，或全局搜索首次访问时提前触发 */
+  ensureCrawlStarted(): void {
+    if (!this.needsFullCrawl || this.indexing) return
+    this.needsFullCrawl = false
+    this.startFullCrawl()
   }
 
   /** 串行化建索 / 实时更新，避免并发写导致 FTS 异常 */
@@ -62,6 +95,7 @@ class FileSearchIndexer {
   }
 
   private startFullCrawl(): void {
+    this.needsFullCrawl = false
     this.enqueue(async () => {
       if (this.indexing) return
       this.indexing = true
@@ -79,6 +113,8 @@ class FileSearchIndexer {
         logToDb('error', 'filesearch', '全盘索引失败', String(err))
       } finally {
         this.indexing = false
+        this.lastCrawlAt = Date.now()
+        this.cachedCount = { at: 0, value: 0 }
         this.scheduleReindex()
         this.startWatching()
       }
@@ -88,10 +124,14 @@ class FileSearchIndexer {
   /** 清空并重新建索（渲染端「重建索引」按钮） */
   rebuild(): void {
     clearAllFiles()
+    this.cachedCount = { at: 0, value: 0 }
     this.startFullCrawl()
   }
 
   query(q: string, topK = 50): FileResult[] {
+    // query / getStatus 是全局搜索仅有的两个消费入口，兼作惰性建索触发点：
+    // 首次打开搜索面板或输入时立即开始建索，不必等 90s 兜底定时器。
+    this.ensureCrawlStarted()
     try {
       return queryFiles(q, topK)
     } catch (err) {
@@ -100,11 +140,28 @@ class FileSearchIndexer {
     }
   }
 
+  // 文件总数缓存：全局搜索面板打开时会以 800ms 周期轮询 status，
+  // 而 countFiles() 是整表 COUNT —— 百万级索引下这是实打实的全表扫描，
+  // 每 0.8s 在主线程上跑一次会明显拖慢搜索输入。总数变化极慢，缓存 10s 足够。
+  private cachedCount = { at: 0, value: 0 }
+
+  private getFileCount(): number {
+    // 建索中不做整表 COUNT：百万级 files 表上这是一次几百毫秒的同步全表扫描，
+    // 而搜索面板每 800ms 就会拉一次 status。期间直接用缓存的旧值即可。
+    if (this.indexing) return this.cachedCount.value
+    const now = Date.now()
+    if (now - this.cachedCount.at < 10_000) return this.cachedCount.value
+    const value = countFiles()
+    this.cachedCount = { at: now, value }
+    return value
+  }
+
   getStatus(): FileSearchStatus {
+    this.ensureCrawlStarted()
     return {
       ready: this.ready,
       indexing: this.indexing,
-      fileCount: countFiles(),
+      fileCount: this.getFileCount(),
       scannedCount: this.scanned,
       drives: this.drives,
     }
@@ -112,9 +169,16 @@ class FileSearchIndexer {
 
   private scheduleReindex(): void {
     if (this.reindexTimer) clearInterval(this.reindexTimer)
+    // 每小时检查一次是否到期；默认（设置=0）永不触发整盘重扫
     this.reindexTimer = setInterval(() => {
-      if (!this.indexing) this.startFullCrawl()
-    }, REINDEX_INTERVAL_MS)
+      if (this.indexing || !this.ready) return
+      const hours = getReindexHours()
+      if (hours > 0 && Date.now() - this.lastCrawlAt >= hours * 3600 * 1000) {
+        logToDb('info', 'filesearch', '周期性全盘重扫触发', `interval=${hours}h`)
+        this.startFullCrawl()
+      }
+    }, REINDEX_CHECK_INTERVAL_MS)
+    ;(this.reindexTimer as unknown as { unref?: () => void }).unref?.()
   }
 
   private startWatching(): void {
@@ -124,7 +188,10 @@ class FileSearchIndexer {
     try {
       this.watcher = chokidar.watch(roots, {
         ignoreInitial: true,
-        depth: 99,
+        // 深度收敛：99 ≈ 无限递归。Windows 上 chokidar 每个被监听目录占一个原生
+        // watch 句柄（内含缓冲），用户主目录浅层目录数量巨大 —— 深度 8 已覆盖
+        // 桌面/文档/下载等常用树，同时显著压低句柄数与内存。深层目录靠全盘索引兜底。
+        depth: 8,
         // Windows 用户主目录下存在大量 junction 别名（Application Data / Cookies /
         // Local Settings / AppData\Local\Application Data 等），fs.watch 会抛 EPERM。
         // 开启 ignorePermissionErrors 让 chokidar 静默跳过，避免未捕获 promise rejection。
