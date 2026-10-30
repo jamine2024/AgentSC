@@ -208,6 +208,57 @@ export default function App() {
   const [cliConsoleOpen, setCliConsoleOpen] = useState(false)
   const [cliActiveRunId, setCliActiveRunId] = useState<string | null>(null)
 
+  // CLI 输出合帧：原实现每条 stdout chunk 直接 setCliRuns —— state 挂在根组件，
+  // 高吞吐命令（ollama run / npm install / ping -t，每秒数百条 chunk）每秒触发
+  // 数百次整树 reconcile，且每条 chunk 都做一次 80KB 字符串拼接拷贝，任何页面
+  // 都会瞬间卡死。改为 chunk 先攒进 ref，120ms 节流合帧提交（终端输出
+  // 8~10fps 足够），渲染压力从 O(chunk) 降到 O(帧)。
+  const pendingCliRef = useRef(new Map<string, string>())
+  const pendingCliExitRef = useRef(new Map<string, number | null>())
+  const cliFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastCliFlushRef = useRef(0)
+
+  const flushCliOutputs = () => {
+    cliFlushTimerRef.current = null
+    const pending = pendingCliRef.current
+    const exits = pendingCliExitRef.current
+    if (pending.size === 0 && exits.size === 0) return
+    pendingCliRef.current = new Map()
+    pendingCliExitRef.current = new Map()
+    lastCliFlushRef.current = Date.now()
+    setCliRuns((prev) => {
+      let next: CliRunState[] | null = null
+      for (const [id, chunk] of pending) {
+        const base = next ?? prev
+        const idx = base.findIndex((r) => r.id === id)
+        if (idx === -1) continue
+        const run = base[idx]
+        let output = run.output + chunk
+        if (output.length > CLI_OUTPUT_CAP) output = output.slice(output.length - CLI_OUTPUT_CAP)
+        if (!next) next = prev.slice()
+        next[idx] = { ...run, output }
+      }
+      // 退出标记在输出之后套用，保证顺序：先累计的正文，再是退出行
+      for (const [id, code] of exits) {
+        const base = next ?? prev
+        const idx = base.findIndex((r) => r.id === id)
+        if (idx === -1) continue
+        const run = base[idx]
+        let output = run.output + `\n\x1b[90m[进程退出 · code ${code ?? '?'}] \x1b[0m\n`
+        if (output.length > CLI_OUTPUT_CAP) output = output.slice(output.length - CLI_OUTPUT_CAP)
+        if (!next) next = prev.slice()
+        next[idx] = { ...run, running: false, finished: true, exitCode: code, output }
+      }
+      return next ?? prev
+    })
+  }
+
+  const scheduleCliFlush = () => {
+    if (cliFlushTimerRef.current) return
+    const elapsed = Date.now() - lastCliFlushRef.current
+    cliFlushTimerRef.current = setTimeout(flushCliOutputs, Math.max(0, 120 - elapsed))
+  }
+
   // 右下角 Toast 通知
   const { toasts, dismissToast } = useToastNotifications()
 
@@ -308,29 +359,14 @@ export default function App() {
   useEffect(() => {
     const onData = (p: unknown) => {
       const d = p as { id: string; data: string }
-      setCliRuns((prev) => {
-        const idx = prev.findIndex((r) => r.id === d.id)
-        if (idx === -1) return prev
-        const run = prev[idx]
-        let output = run.output + stripAnsi(d.data)
-        if (output.length > CLI_OUTPUT_CAP) output = output.slice(output.length - CLI_OUTPUT_CAP)
-        const next = prev.slice()
-        next[idx] = { ...run, output }
-        return next
-      })
+      const cur = pendingCliRef.current.get(d.id) ?? ''
+      pendingCliRef.current.set(d.id, cur + stripAnsi(d.data))
+      scheduleCliFlush()
     }
     const onExit = (p: unknown) => {
       const e = p as { id: string; code: number | null }
-      setCliRuns((prev) => {
-        const idx = prev.findIndex((r) => r.id === e.id)
-        if (idx === -1) return prev
-        const run = prev[idx]
-        let output = run.output + `\n\x1b[90m[进程退出 · code ${e.code ?? '?'}] \x1b[0m\n`
-        if (output.length > CLI_OUTPUT_CAP) output = output.slice(output.length - CLI_OUTPUT_CAP)
-        const next = prev.slice()
-        next[idx] = { ...run, running: false, finished: true, exitCode: e.code ?? null, output }
-        return next
-      })
+      pendingCliExitRef.current.set(e.id, e.code ?? null)
+      scheduleCliFlush()
     }
     api?.on('cli:data', onData)
     api?.on('cli:exit', onExit)
@@ -376,6 +412,10 @@ export default function App() {
     return () => {
       api?.removeAllListeners('cli:data')
       api?.removeAllListeners('cli:exit')
+      if (cliFlushTimerRef.current) {
+        clearTimeout(cliFlushTimerRef.current)
+        cliFlushTimerRef.current = null
+      }
     }
   }, [])
 

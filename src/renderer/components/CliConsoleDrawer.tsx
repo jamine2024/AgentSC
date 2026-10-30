@@ -53,9 +53,12 @@ export function CliConsoleDrawer(props: CliConsoleDrawerProps) {
   const active = runs.find((r) => r.id === activeRunId) || runs[runs.length - 1] || null
   const outputEndRef = useRef<HTMLDivElement>(null)
 
-  // 输出区自动滚动到底部（仅当前激活任务）
+  // 输出区自动滚动到底部（仅当前激活任务）。
+  // behavior 必须用 'auto'：流式输出合帧后仍会以 ~8fps 连续触发本 effect，
+  // smooth 的滚动动画每次都要几百 ms，新动画未完又排队下一个，合成器被堆爆；
+  // 瞬时跳底在视觉上等效且零堆积。
   useEffect(() => {
-    outputEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    outputEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
   }, [active?.output, active?.id])
 
   if (!open) return null

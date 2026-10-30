@@ -20,6 +20,7 @@ import { app } from 'electron'
 import forge from 'node-forge'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { lookupProcessName } from './processTracker'
 
 const execFileAsync = promisify(execFile)
 
@@ -92,8 +93,11 @@ const HOP_HEADERS = new Set([
   'trailer',
 ])
 
-const SESSION_CAP = 6000
+const SESSION_CAP = 3000
 const BODY_CAP = 256 * 1024 // 仅对文本类响应/请求体做有限捕获（≤256KB）
+// 会话正文总内存预算：超出后从最旧会话开始丢弃正文（保留元数据行），
+// 保证抓包长跑时正文内存有硬上限，而不是随 SESSION_CAP 线性涨到 GB 级。
+const BODY_BUDGET_BYTES = 64 * 1024 * 1024
 
 function cleanHeaders(h: Record<string, any>): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {}
@@ -273,8 +277,18 @@ class PacketCaptureEngine extends EventEmitter {
     }
   }
 
+  // 列表 IPC 默认剥离正文：全量 list 含正文时结构化克隆期间主线程阻塞、
+  // 渲染端内存翻倍（几百 MB 级）。正文由 getBodyById 按选中会话单独取。
+  // exportSessions 导出仍走全量（用户显式动作，一次性）。
   getSessions(): CaptureSession[] {
-    return this.sessions
+    return this.sessions.map((s) =>
+      s.reqBody || s.resBody ? { ...s, reqBody: null, resBody: null } : s,
+    )
+  }
+
+  getBodyById(id: number): { id: number; reqBody: string | null; resBody: string | null } {
+    const s = this.sessions.find((x) => x.id === id)
+    return { id, reqBody: s?.reqBody ?? null, resBody: s?.resBody ?? null }
   }
 
   clearSessions() {
@@ -388,37 +402,73 @@ class PacketCaptureEngine extends EventEmitter {
   }
 
   // ── 进程归属（锁定应用） ──────────────────────────────────
-  private async ps(script: string): Promise<string> {
-    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      windowsHide: true,
-      timeout: 8000,
-    })
-    return stdout
+  // 原实现：每个 HTTP 请求 / 每个 CONNECT 都 execFile 一个 powershell.exe 跑
+  // Get-NetTCPConnection 查端口归属。开系统代理后全桌面流量过代理，浏览器一个
+  // 页面的 30~100 条并发连接 = 同一时刻 spawn 几十个 powershell（每个瞬时
+  // 50~100MB + 冷启动 CPU）——"内存爆满、瞬间卡死"的直接来源。
+  // 改为 netstat -ano（Windows 原生小工具，~50ms / ~10MB）+ 1 秒 TTL 缓存：
+  // 无论请求速率多高，TCP 端口表最多每秒刷新一次且严格串行；进程名复用
+  // processTracker 的批量查名（一次 tasklist 快照解析任意多个 pid），本模块
+  // 在热路径上零子进程。
+  private tcpPortPidCache = new Map<number, number>()
+  private tcpTableAt = 0
+  private tcpTableRefresh: Promise<void> | null = null
+
+  private refreshTcpTable(): Promise<void> {
+    if (this.tcpTableRefresh) return this.tcpTableRefresh
+    this.tcpTableRefresh = (async () => {
+      try {
+        const { stdout } = await execFileAsync('netstat', ['-ano', '-p', 'tcp'], {
+          windowsHide: true,
+          timeout: 5000,
+          maxBuffer: 8 * 1024 * 1024,
+        })
+        const map = new Map<number, number>()
+        for (const line of stdout.split('\n')) {
+          // 数据行：TCP    127.0.0.1:8888    1.2.3.4:443    ESTABLISHED    4321
+          // 表头/分隔行按首 token 必须是 "TCP" 过滤（本地化表头也不匹配）
+          const parts = line.trim().split(/\s+/)
+          if (parts.length < 5 || parts[0].toUpperCase() !== 'TCP') continue
+          const local = parts[1]
+          const ci = local.lastIndexOf(':')
+          if (ci < 0) continue
+          const port = parseInt(local.slice(ci + 1), 10)
+          const pid = parseInt(parts[4], 10)
+          if (!isNaN(port) && !isNaN(pid) && pid > 0) map.set(port, pid)
+        }
+        // 空表（netstat 被拦截/异常）不覆盖旧缓存，下轮重试
+        if (map.size > 0) {
+          this.tcpPortPidCache = map
+          this.tcpTableAt = Date.now()
+        }
+      } catch {
+        // 刷新失败保留旧表；锁定判定退化为 allow，不影响代理转发本身
+      } finally {
+        this.tcpTableRefresh = null
+      }
+    })()
+    return this.tcpTableRefresh
   }
 
   private async resolvePidByLocalPort(localPort: number): Promise<number | null> {
-    try {
-      const out = await this.ps(
-        `(Get-NetTCPConnection -LocalPort ${localPort} -State Established | Select-Object -First 1).OwningProcess`,
-      )
-      const pid = parseInt((out || '').trim(), 10)
-      return isNaN(pid) ? null : pid
-    } catch {
-      return null
-    }
+    if (Date.now() - this.tcpTableAt > 1000) await this.refreshTcpTable()
+    return this.tcpPortPidCache.get(localPort) ?? null
   }
 
   private async resolveProcessName(pid: number): Promise<string> {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return String(pid)
     const cached = this.pidNameCache.get(pid)
     if (cached) return cached
-    try {
-      const out = await this.ps(`(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).Name`)
-      const name = (out || '').trim() || String(pid)
-      this.pidNameCache.set(pid, name)
-      return name
-    } catch {
-      return String(pid)
+    // processTracker 批量查名：未命中先排队，等一轮（600ms）的 tasklist
+    // 批量快照后重取一次；仍为空按未知进程显示 pid，不影响锁定判定
+    // （锁定比较只看 pid，名字仅用于展示）
+    let name = lookupProcessName(pid)
+    if (!name) {
+      await new Promise((r) => setTimeout(r, 600))
+      name = lookupProcessName(pid)
     }
+    if (name) this.pidNameCache.set(pid, name)
+    return name || String(pid)
   }
 
   private async checkLock(socket: net.Socket): Promise<{ allow: boolean; name: string }> {
@@ -432,6 +482,37 @@ class PacketCaptureEngine extends EventEmitter {
   }
 
   // ── 会话记录 ──────────────────────────────────────────────
+  // 正文内存记账：每条会话的 req/res 正文最多各 BODY_CAP，SESSION_CAP 条满载
+  // 理论可达 GB 级。用 WeakMap 记录每条会话已计入的字节数（pushSession 可能
+  // 对同一会话多次调用），全局总量超 BODY_BUDGET_BYTES 后从最旧会话起丢弃正文。
+  private countedBodies = new WeakMap<CaptureSession, number>()
+  private bodyBytes = 0
+
+  private accountSessionBodies(s: CaptureSession): void {
+    const total = (s.reqBody ? s.reqBody.length : 0) + (s.resBody ? s.resBody.length : 0)
+    const prev = this.countedBodies.get(s) ?? 0
+    if (total === prev) return
+    this.bodyBytes += total - prev
+    this.countedBodies.set(s, total)
+  }
+
+  private releaseSessionBodies(s: CaptureSession): void {
+    const prev = this.countedBodies.get(s) ?? 0
+    if (prev === 0) return
+    this.bodyBytes -= prev
+    this.countedBodies.delete(s)
+    s.reqBody = null
+    s.resBody = null
+  }
+
+  private enforceBodyBudget(): void {
+    if (this.bodyBytes <= BODY_BUDGET_BYTES) return
+    for (const s of this.sessions) {
+      if (this.bodyBytes <= BODY_BUDGET_BYTES) break
+      this.releaseSessionBodies(s)
+    }
+  }
+
   private newSession(partial: Partial<CaptureSession>): CaptureSession {
     const s: CaptureSession = {
       id: ++this.seq,
@@ -459,8 +540,13 @@ class PacketCaptureEngine extends EventEmitter {
   }
 
   private pushSession(s: CaptureSession) {
+    this.accountSessionBodies(s)
     this.sessions.push(s)
-    if (this.sessions.length > SESSION_CAP) this.sessions.shift()
+    if (this.sessions.length > SESSION_CAP) {
+      const dropped = this.sessions.shift()
+      if (dropped) this.releaseSessionBodies(dropped)
+    }
+    this.enforceBodyBudget()
     this.emit('session', s)
   }
 
@@ -604,6 +690,13 @@ class PacketCaptureEngine extends EventEmitter {
         } catch {
           /* ignore */
         }
+        // tlsServer 与本条 CONNECT 一一对应，连接结束必须一并关闭，
+        // 否则 Server 句柄随连接数累积（原实现只关了内层 httpServer）
+        try {
+          tlsServer.close(() => {})
+        } catch {
+          /* ignore */
+        }
       })
     })
     tlsServer.emit('connection', clientSocket)
@@ -733,6 +826,16 @@ class PacketCaptureEngine extends EventEmitter {
   }
 
   // ── 系统代理（Windows Internet Settings） ─────────────────
+  // 仅系统代理开/关这类用户一次性动作使用（低频，不在请求热路径上）；
+  // 请求热路径的进程归属解析已改走 netstat 缓存，见 refreshTcpTable。
+  private async ps(script: string): Promise<string> {
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      timeout: 8000,
+    })
+    return stdout
+  }
+
   async setSystemProxy(enable: boolean): Promise<{ ok: boolean; message: string }> {
     const key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
     const proxy = `127.0.0.1:${this.port}`

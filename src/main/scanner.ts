@@ -38,6 +38,21 @@ function shouldSkip(filePath: string) {
   return false
 }
 
+// topDirs 只服务于 Top10 进度展示，但原实现从不清理：扫大盘/深目录时每个
+// 目录 set 一次，几十万条目的 Map 常驻内存，且进度节流每 80ms 对全量 Map
+// 排序一次，越扫越卡。超过 2xKEEP 后修剪到 KEEP（留下的本就是全局最大的一批，
+// Top10 展示精度不受影响），Map 体积与排序成本随之有界。
+const TOP_DIRS_KEEP = 500
+
+function recordTopDir(ctx: ScanContext, dirPath: string, total: number): void {
+  const map = ctx.topDirs
+  map.set(dirPath, total)
+  if (map.size > TOP_DIRS_KEEP * 2) {
+    const kept = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, TOP_DIRS_KEEP)
+    ctx.topDirs = new Map(kept)
+  }
+}
+
 function tryEmitProgress(ctx: ScanContext, currentPath: string) {
   const now = Date.now()
   if (now - ctx.lastProgressTime > 80 && ctx.onProgress) {
@@ -141,7 +156,7 @@ async function getDirSize(dirPath: string, depth: number, maxDepth: number, ctx:
   }
 
   node.size = total
-  ctx.topDirs.set(dirPath, total)
+  recordTopDir(ctx, dirPath, total)
 
   if (children.length > 0) {
     children.sort((a, b) => b.size - a.size)

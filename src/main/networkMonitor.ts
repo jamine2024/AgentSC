@@ -288,13 +288,17 @@ export class NetworkMonitor {
 
   // ── 流量采集 ──
   private async scanTraffic() {
+    // 进程名解析用哈希表 O(P+C) 完成；原实现 foreach 里 Where-Object 线性
+    // 扫全进程表是 O(连接×进程)，几百连接×几百进程时单轮要拖到秒级
     const script = `
 $stats = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue | Where-Object { $_.ReceivedBytes -ne $null } | Select-Object Name, ReceivedBytes, SentBytes)
 $conns = @(Get-NetTCPConnection -ErrorAction SilentlyContinue)
 $procs = Get-Process -ErrorAction SilentlyContinue
+$pmap = @{}
+foreach ($p in $procs) { $pmap[[int]$p.Id] = $p.ProcessName }
 $map = @{}
-foreach ($c in $conns) { $id = $c.OwningProcess; $map[$id] = ($map[$id] ?? 0) + 1 }
-$top = $map.Keys | ForEach-Object { $p = $procs | Where-Object { $_.Id -eq [int]$_ } | Select-Object -First 1; [PSCustomObject]@{ pid=[int]$_; name=if($p){$p.ProcessName}else{'unknown'}; conns=$map[$_] } } | Sort-Object conns -Descending | Select-Object -First 12
+foreach ($c in $conns) { $id = [int]$c.OwningProcess; $map[$id] = ($map[$id] ?? 0) + 1 }
+$top = $map.Keys | ForEach-Object { [PSCustomObject]@{ pid=[int]$_; name=($pmap[$_] ?? 'unknown'); conns=$map[$_] } } | Sort-Object conns -Descending | Select-Object -First 12
 $states = @{}
 foreach ($g in ($conns | Group-Object State)) { $states[$g.Name] = $g.Count }
 [PSCustomObject]@{
@@ -759,18 +763,44 @@ $adapters | ConvertTo-Json -Depth 4 -Compress
     this.pushStatus()
   }
 
+  // 在途保护：原实现 setInterval 直接 void tick，PowerShell 单轮超过间隔
+  // （超时设 20s 而流量轮询 3s）时进程逐轮叠加——十几个 powershell.exe 同时
+  // 跑，内存与 CPU 双爆。加了闸门后上一轮没回来就跳过本轮，任何时刻每类
+  // 扫描至多一个子进程在途。
+  private trafficInFlight = false
+  private arpInFlight = false
+  private dhcpInFlight = false
+
   private async tickTraffic() {
-    await this.scanTraffic()
-    this.pushStatus()
+    if (this.trafficInFlight) return
+    this.trafficInFlight = true
+    try {
+      await this.scanTraffic()
+      this.pushStatus()
+    } finally {
+      this.trafficInFlight = false
+    }
   }
 
   private async tickArp() {
-    await this.scanArp()
-    this.pushStatus()
+    if (this.arpInFlight) return
+    this.arpInFlight = true
+    try {
+      await this.scanArp()
+      this.pushStatus()
+    } finally {
+      this.arpInFlight = false
+    }
   }
 
   private async tickDhcp() {
-    await this.scanDhcp()
-    this.pushStatus()
+    if (this.dhcpInFlight) return
+    this.dhcpInFlight = true
+    try {
+      await this.scanDhcp()
+      this.pushStatus()
+    } finally {
+      this.dhcpInFlight = false
+    }
   }
 }

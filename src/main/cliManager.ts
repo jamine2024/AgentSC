@@ -31,6 +31,9 @@ interface RegistryEntry {
 }
 
 // 内置 CLI 工具注册表（仅相关命令行工具）
+// 保留的已结束运行数（含输出缓冲），超出丢弃最旧的
+const FINISHED_RUNS_KEEP = 20
+
 const REGISTRY: RegistryEntry[] = [
   // 模型运行时 / 本地推理
   { id: 'llama-server', name: 'llama.cpp Server', command: 'llama-server', category: 'model', description: 'llama.cpp 本地推理服务（OpenAI 兼容）' },
@@ -348,6 +351,12 @@ export function runCli(
     // 退出后保留元数据与缓冲，移到 finishedRuns，便于渲染端恢复查看
     runs.delete(id)
     finishedRuns.set(id, handle)
+    // finishedRuns 上限：句柄含最长 200K 字符的输出缓冲，只在显式清空时
+    // 释放；不设上限时长期多次运行会缓慢累积，保留最近 FINISHED_KEEP 条
+    if (finishedRuns.size > FINISHED_RUNS_KEEP) {
+      const oldest = finishedRuns.keys().next().value
+      if (oldest !== undefined) finishedRuns.delete(oldest)
+    }
     try {
       sender.send('cli:exit', { id, code })
     } catch {

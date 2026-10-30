@@ -260,7 +260,7 @@ async function loadRegistryEntries(): Promise<RegEntry[]> {
     REG_ROOTS.map(
       (root) =>
         new Promise<void>((resolve) => {
-          execFile('cmd', ['/c', 'reg', 'query', root, '/s'], { windowsHide: true, timeout: 20000 }, (err, stdout) => {
+          execFile('cmd', ['/c', 'reg', 'query', root, '/s'], { windowsHide: true, timeout: 20000, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
             if (!err && stdout) results.push(...parseRegQuery(stdout))
             resolve()
           })

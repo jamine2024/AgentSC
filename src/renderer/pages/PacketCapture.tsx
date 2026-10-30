@@ -166,13 +166,31 @@ export default function PacketCapture() {
     window.setTimeout(() => setMessage(null), 4000)
   }
 
+  // 列表 IPC 不携带正文（避免全量克隆大 payload），选中行再按需补取一次
+  const selectSession = (s: CapSession) => {
+    setSelected(s)
+    if (s.reqBody == null && s.resBody == null && (s.reqSize > 0 || s.resSize > 0)) {
+      void api?.invoke('packet-capture:body', s.id).then((b) => {
+        const body = b as { id: number; reqBody: string | null; resBody: string | null } | null
+        if (!body || body.id !== s.id) return
+        sessionsRef.current.set(s.id, { ...s, reqBody: body.reqBody, resBody: body.resBody })
+        setSessions((prev) =>
+          prev.map((x) => (x.id === s.id ? { ...x, reqBody: body.reqBody, resBody: body.resBody } : x)),
+        )
+        setSelected((cur) =>
+          cur && cur.id === s.id ? { ...cur, reqBody: body.reqBody, resBody: body.resBody } : cur,
+        )
+      })
+    }
+  }
+
   const GRID = 'grid grid-cols-[88px_52px_48px_44px_minmax(0,1fr)_minmax(0,1.5fr)_60px_76px_minmax(0,0.9fr)_72px] items-center'
   const Row = ({ index, style, data }: ListChildComponentProps<CapSession[]>) => {
     const s = data[index]
     if (!s) return null
     const isSel = selected?.id === s.id
     return (
-      <div style={style} onClick={() => setSelected(s)}
+      <div style={style} onClick={() => selectSession(s)}
         className={cn(GRID, 'cursor-pointer border-t border-white/5 hover:bg-white/[0.03]', isSel && 'bg-primary/10')}>
         <div className="px-3 text-muted-foreground">{formatTime(s.ts)}</div>
         <div className={cn('px-2 font-semibold', METHOD_COLOR[s.method] || 'text-foreground')}>{s.method}</div>

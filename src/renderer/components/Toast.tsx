@@ -11,6 +11,10 @@ export interface ToastItem {
 
 let toastIdCounter = 0
 
+// 同屏 toast 上限：告警风暴（扫描/大文件检测连发）时 5 秒窗口内可堆出
+// 成百上千个带入场动画的 fixed 元素，把合成器打爆。超过后丢弃最旧的。
+const TOAST_MAX = 6
+
 export function useToastNotifications() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const api = window.electronAPI
@@ -20,7 +24,10 @@ export function useToastNotifications() {
       const d = data as { title: string; body: string; timestamp: number }
       if (d && d.title) {
         const id = ++toastIdCounter
-        setToasts((prev) => [...prev, { ...d, id }])
+        setToasts((prev) => {
+          const next = [...prev, { ...d, id }]
+          return next.length > TOAST_MAX ? next.slice(next.length - TOAST_MAX) : next
+        })
         // 5 秒后自动移除
         setTimeout(() => {
           setToasts((prev) => prev.filter((t) => t.id !== id))

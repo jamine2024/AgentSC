@@ -1634,6 +1634,7 @@ ipcMain.handle('packet-capture:stop', async () => {
 })
 ipcMain.handle('packet-capture:status', () => packetCapture.status())
 ipcMain.handle('packet-capture:list', () => packetCapture.getSessions())
+ipcMain.handle('packet-capture:body', (_event, id: number) => packetCapture.getBodyById(Number(id)))
 ipcMain.handle('packet-capture:clear', () => {
   packetCapture.clearSessions()
   return { ok: true }

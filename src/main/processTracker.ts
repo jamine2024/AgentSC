@@ -153,6 +153,13 @@ function scheduleNameFlush(): void {
   ;(nameFlushTimer as any).unref?.()
 }
 
+// 供 packetCapture 等模块按 pid 查进程名：未命中时把 pid 排进待查集合，
+// 由 400ms 去抖的一次 tasklist 全量快照统一解析（任意多个 pid 只 spawn 一次），
+// 命中返回进程名，未命中返回空串（调用方稍后重试即可）。
+export function lookupProcessName(pid: number): string {
+  return resolveProcessName(pid)
+}
+
 function resolveProcessName(pid: number): string {
   if (pid <= 0) return ''
   const now = Date.now()

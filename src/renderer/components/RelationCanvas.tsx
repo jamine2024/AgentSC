@@ -251,7 +251,11 @@ export default function RelationCanvas({
       }
       nodesRef.current = newNodes
       edgesRef.current = newEdges
-      alphaRef.current = Math.max(alphaRef.current, 0.5)
+      // 重热幅度 0.5 → 0.15：事件流每 500ms 一批，若每次都拉回 0.5，
+      // alpha 永远衰减不到停帧阈值（0.005），按需渲染退化为持续 60fps +
+      // 每帧 O(n²) 斥力计算。0.15 足以让增量节点归位，事件流持续时也能
+      // 在批次间隙收敛停帧。
+      alphaRef.current = Math.max(alphaRef.current, 0.15)
       wakeRef.current?.()
     },
     [density, t],
@@ -480,6 +484,13 @@ export default function RelationCanvas({
     let running = true
     const loop = () => {
       if (!running) return
+      // 页面隐藏（切托盘/最小化）时不画不仿真：事件流仍在重建节点、
+      // 反复抬 alpha，隐藏状态下继续跑就是纯烧 CPU。隐藏期间直接停帧，
+      // 恢复可见时由 rebuild 的 wake 唤醒。
+      if (typeof document !== 'undefined' && document.hidden) {
+        running = false
+        return
+      }
       const needFrame = !pausedRef.current && alphaRef.current > 0.005
       if (needFrame) {
         tick()
@@ -496,6 +507,11 @@ export default function RelationCanvas({
       running = true
       raf = requestAnimationFrame(loop)
     }
+    // 隐藏期间停帧后，重新可见时主动唤醒（事件流停歇时没有 rebuild 触发 wake）
+    const onVisibility = () => {
+      if (!document.hidden) wake()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
     raf = requestAnimationFrame(loop)
     // rebuild 会把 alpha 抬回 0.5，这里同步唤醒循环
     wakeRef.current = wake
@@ -503,6 +519,7 @@ export default function RelationCanvas({
     return () => {
       running = false
       cancelAnimationFrame(raf)
+      document.removeEventListener('visibilitychange', onVisibility)
       ro.disconnect()
       wakeRef.current = null
     }

@@ -64,6 +64,9 @@ interface ChatMessage {
 }
 
 const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download'
+// 对话消息条数上限：全量渲染 + 历史常驻内存，长对话越聊越卡；
+// 裁剪按对齐边界由 slice 自然处理，当前上下文窗口不受影响
+const CHAT_MESSAGE_CAP = 60
 
 export default function Ollama() {
   const api = window.electronAPI
@@ -140,8 +143,18 @@ export default function Ollama() {
   useEffect(() => {
     if (!api) return
     const onPull = (p: unknown) => setPullProgress(p as PullProgress)
-    const onToken = (delta: unknown) => {
-      const d = String(delta ?? '')
+    // token 合帧：LLM 流式输出每秒几十 token，原实现每 token 复制一次整个
+    // 消息数组并全量 reconcile 长对话，越聊越卡。token 先攒进 ref，
+    // 120ms 合帧提交一次（与打字机观感无差异）。
+    let pendingToken = ''
+    let tokenTimer: ReturnType<typeof setTimeout> | null = null
+    let lastFlush = 0
+    const flushToken = () => {
+      tokenTimer = null
+      if (!pendingToken) return
+      const d = pendingToken
+      pendingToken = ''
+      lastFlush = Date.now()
       setChatMessages((prev) => {
         const copy = [...prev]
         const idx = copy.length - 1
@@ -152,18 +165,27 @@ export default function Ollama() {
         return copy
       })
     }
+    const scheduleToken = () => {
+      if (tokenTimer) return
+      tokenTimer = setTimeout(flushToken, Math.max(0, 120 - (Date.now() - lastFlush)))
+    }
+    const onToken = (delta: unknown) => {
+      pendingToken += String(delta ?? '')
+      scheduleToken()
+    }
     api.on('ollama-pull-progress', onPull)
     api.on('ollama-chat-token', onToken)
     return () => {
+      if (tokenTimer) clearTimeout(tokenTimer)
       api?.removeAllListeners('ollama-pull-progress')
       api?.removeAllListeners('ollama-chat-token')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 聊天滚动到底部
+  // 聊天滚动到底部（auto：流式期间 ~8fps 触发，smooth 动画会排队堆叠）
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    chatEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
   }, [chatMessages])
 
   async function handleStart() {
@@ -253,7 +275,12 @@ export default function Ollama() {
     if (!api || !chatModelName || !chatInput.trim() || chatLoading) return
     const userMsg: ChatMessage = { role: 'user', content: chatInput.trim() }
     const history: ChatMessage[] = [...chatMessages, userMsg]
-    setChatMessages((prev) => [...prev, userMsg, { role: 'assistant', content: '' }])
+    const clipped = history.length > CHAT_MESSAGE_CAP ? history.slice(history.length - CHAT_MESSAGE_CAP) : history
+    if (clipped !== history) setChatMessages(clipped)
+    setChatMessages((prev) => {
+      const next: ChatMessage[] = [...prev, userMsg, { role: 'assistant', content: '' }]
+      return next.length > CHAT_MESSAGE_CAP ? next.slice(next.length - CHAT_MESSAGE_CAP) : next
+    })
     setChatInput('')
     setChatError('')
     setChatLoading(true)
